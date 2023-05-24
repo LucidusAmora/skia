@@ -61,6 +61,11 @@ jobs:
         fi
         if [[ "${{ runner.os }}" == "Windows" ]] ; then
           export gn_flags='win_vc="C:/Program Files (x86)/Microsoft Visual Studio/2019/Enterprise/VC" win_toolchain_version="15.0" win_sdk="C:\\Program Files (x86)\\Windows Kits\\10" win_sdk_version="10.0.18362.0" cc="clang" cxx="clang++" clang_win="C:\Program Files\LLVM" clang_win_version="9.0.0"'
+          if [[ "${{ matrix.mode }}" == "Debug" ]] ; then
+            export gn_flags="$gn_flags extra_cflags=[\"-MDd\"]"
+          else
+            export gn_flags="$gn_flags extra_cflags=[\"-MD\"]"
+          fi
         elif [[ "${{ runner.os }}" == "macOS" ]] ; then
           if [[ "${{ matrix.arch }}" == arm64 ]] ; then
             export gn_flags='extra_cflags=["-stdlib=libc++", "-mmacosx-version-min=11.0"] extra_cflags_cc=["-frtti"]'
