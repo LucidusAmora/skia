@@ -24,8 +24,7 @@ jobs:
       id: cache-deps
       uses: actions/cache@v3
       with:
-        # npm cache files are stored in `~/.npm` on Linux/macOS
-        path: ${PWD}/third_party/externals
+        path: $GITHUB_WORKSPACE/third_party/externals
         key: cache-deps-0
     - name: Install Dependencies
       shell: bash
