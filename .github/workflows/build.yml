@@ -24,11 +24,12 @@ jobs:
       id: cache-deps
       uses: actions/cache@v3
       with:
-        path: $GITHUB_WORKSPACE/third_party/externals
+        path: ${{ github.workspace }}/third_party/externals
         key: cache-deps-0
     - name: Install Dependencies
       shell: bash
       run: |
+        echo "${{ github.workspace }}/third_party/externals"
         if [[ "${{ runner.os }}" == "Windows" ]] ; then
           choco install llvm
           choco install zip
