@@ -107,7 +107,7 @@ jobs:
           src/core/*.h \
           src/gpu/gl/*.h \
           $dst
-        find modules -name '*.h' -exec cp --parents {} $dst \;
+        find modules -name '*.h' -exec gcp --parents {} $dst \;
     - name: Uploading Artifact
       uses: actions/upload-artifact@v1
       with:
