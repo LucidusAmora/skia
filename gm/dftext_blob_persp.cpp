@@ -26,6 +26,7 @@
 #include "include/gpu/ganesh/SkSurfaceGanesh.h"
 #include "include/private/base/SkTArray.h"
 #include "tools/ToolUtils.h"
+#include "tools/fonts/FontToolUtils.h"
 
 #include <initializer_list>
 
@@ -41,15 +42,13 @@ public:
     DFTextBlobPerspGM() { this->setBGColor(0xFFFFFFFF); }
 
 protected:
-    SkString onShortName() override {
-        return SkString("dftext_blob_persp");
-    }
+    SkString getName() const override { return SkString("dftext_blob_persp"); }
 
-    SkISize onISize() override { return SkISize::Make(900, 350); }
+    SkISize getISize() override { return SkISize::Make(900, 350); }
 
     void onOnceBeforeDraw() override {
         for (int i = 0; i < 3; ++i) {
-            SkFont font;
+            SkFont font = ToolUtils::DefaultPortableFont();
             font.setSize(32);
             font.setEdging(i == 0 ? SkFont::Edging::kAlias :
                            (i == 1 ? SkFont::Edging::kAntiAlias :
@@ -64,7 +63,7 @@ protected:
     void onDraw(SkCanvas* inputCanvas) override {
         // set up offscreen rendering with distance field text
         auto ctx = inputCanvas->recordingContext();
-        SkISize size = this->onISize();
+        SkISize size = this->getISize();
         if (!inputCanvas->getBaseLayerSize().isEmpty()) {
             size = inputCanvas->getBaseLayerSize();
         }

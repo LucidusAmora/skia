@@ -19,6 +19,7 @@
 #include "src/gpu/graphite/PipelineData.h"
 #include "src/gpu/graphite/RecorderPriv.h"
 #include "src/gpu/graphite/TextureProxy.h"
+#include "src/gpu/graphite/TextureUtils.h"
 #include "src/gpu/graphite/UniformManager.h"
 #include "src/gpu/graphite/compute/DispatchGroup.h"
 
@@ -26,6 +27,18 @@
 
 namespace skgpu::graphite {
 namespace {
+
+BufferView new_storage_slice(DrawBufferManager* mgr,
+                             size_t size,
+                             ClearBuffer cleared = ClearBuffer::kNo) {
+    BindBufferInfo info = mgr->getStorage(size, cleared);
+    return {info, info ? size : 0};
+}
+
+BufferView new_indirect_slice(DrawBufferManager* mgr, size_t size) {
+    BindBufferInfo info = mgr->getIndirectStorage(size, ClearBuffer::kYes);
+    return {info, info ? size : 0};
+}
 
 ::rust::Slice<uint8_t> to_slice(void* ptr, size_t size) {
     return {static_cast<uint8_t*>(ptr), size};
@@ -54,18 +67,51 @@ WorkgroupSize to_wg_size(const vello_cpp::WorkgroupSize& src) {
 }
 
 vello_cpp::Fill to_fill_type(SkPathFillType fillType) {
+    // Vello does not provide an encoding for inverse fill types. When Skia uses vello to render
+    // a coverage mask for an inverse fill, it encodes a regular fill and inverts the coverage value
+    // after sampling the mask.
     switch (fillType) {
         case SkPathFillType::kWinding:
+        case SkPathFillType::kInverseWinding:
             return vello_cpp::Fill::NonZero;
         case SkPathFillType::kEvenOdd:
+        case SkPathFillType::kInverseEvenOdd:
             return vello_cpp::Fill::EvenOdd;
-        default:
-            // TODO(b/238756757): vello doesn't define fill types for kInverseWinding and
-            // kInverseEvenOdd. This should be updated to support those cases.
-            SkDebugf("fill type not supported by vello\n");
-            break;
     }
     return vello_cpp::Fill::NonZero;
+}
+
+vello_cpp::CapStyle to_cap_style(SkPaint::Cap cap) {
+    switch (cap) {
+        case SkPaint::Cap::kButt_Cap:
+            return vello_cpp::CapStyle::Butt;
+        case SkPaint::Cap::kRound_Cap:
+            return vello_cpp::CapStyle::Round;
+        case SkPaint::Cap::kSquare_Cap:
+            return vello_cpp::CapStyle::Square;
+    }
+    SkUNREACHABLE;
+}
+
+vello_cpp::JoinStyle to_join_style(SkPaint::Join join) {
+    switch (join) {
+        case SkPaint::Join::kMiter_Join:
+            return vello_cpp::JoinStyle::Miter;
+        case SkPaint::Join::kBevel_Join:
+            return vello_cpp::JoinStyle::Bevel;
+        case SkPaint::Join::kRound_Join:
+            return vello_cpp::JoinStyle::Round;
+    }
+    SkUNREACHABLE;
+}
+
+vello_cpp::Stroke to_stroke(const SkStrokeRec& style) {
+    return vello_cpp::Stroke{
+            /*width=*/style.getWidth(),
+            /*miter_limit=*/style.getMiter(),
+            /*cap*/ to_cap_style(style.getCap()),
+            /*join*/ to_join_style(style.getJoin()),
+    };
 }
 
 class PathIter : public vello_cpp::PathIterator {
@@ -157,6 +203,10 @@ private:
 
 VelloScene::VelloScene() : fEncoding(vello_cpp::new_encoding()) {}
 
+void VelloScene::reset() {
+    fEncoding->reset();
+}
+
 void VelloScene::solidFill(const SkPath& shape,
                            const SkColor4f& fillColor,
                            const SkPathFillType fillType,
@@ -170,14 +220,13 @@ void VelloScene::solidFill(const SkPath& shape,
 
 void VelloScene::solidStroke(const SkPath& shape,
                              const SkColor4f& fillColor,
-                             const StrokeStyle& style,
+                             const SkStrokeRec& style,
                              const Transform& t) {
-    // Vello currently only supports round stroke styles
+    // TODO: Obtain dashing pattern here and let Vello handle dashing on the CPU while
+    // encoding the path?
     PathIter iter(shape, t);
-    fEncoding->stroke({style.width()},
-                      to_vello_affine(t),
-                      {vello_cpp::BrushKind::Solid, {to_vello_color(fillColor)}},
-                      iter);
+    vello_cpp::Brush brush{vello_cpp::BrushKind::Solid, {to_vello_color(fillColor)}};
+    fEncoding->stroke(to_stroke(style), to_vello_affine(t), brush, iter);
 }
 
 void VelloScene::pushClipLayer(const SkPath& shape, const Transform& t) {
@@ -192,7 +241,14 @@ void VelloScene::popClipLayer() {
     SkDEBUGCODE(fLayers--;)
 }
 
-VelloRenderer::VelloRenderer(const Caps* caps) {
+VelloRenderer::VelloRenderer(const Caps* caps)
+        // We currently use the fine stage to rasterize a coverage mask. For full compositing, we
+        // should instantiate a second variant of fine with a different color format.
+        //
+        // Currently fine has only one variant: on Metal this variant can operate on any floating
+        // point format (so we set it to R8) but on Dawn it must use RGBA8unorm.
+        : fFineArea(ComputeShaderCoverageMaskTargetFormat(caps))
+        , fFineMsaa16(ComputeShaderCoverageMaskTargetFormat(caps)) {
     fGradientImage = TextureProxy::Make(caps,
                                         {1, 1},
                                         kRGBA_8888_SkColorType,
@@ -241,15 +297,6 @@ std::unique_ptr<DispatchGroup> VelloRenderer::renderScene(const RenderParams& pa
     auto dispatchInfo = config->workgroup_counts();
     auto bufferSizes = config->buffer_sizes();
 
-    // TODO(b/279955342): VelloComputeSteps do not perform any per-draw computation. Instead all
-    // buffer and global dispatch sizes get computed upfront from the scene encoding
-    // (in `prepare_render()` above).
-    //
-    // We should have an alternate appendStep() interface for ComputeSteps that implement per-draw
-    // logic for batched processing (e.g. geometry dispatches that offload CPU-side RenderStep
-    // logic). DispatchGroup::Builder can operate over pre-computed data without requiring a
-    // DrawParams parameter and we should remove the need for a `placeholder`.
-    DrawParams placeholder(Transform::Identity(), {}, {}, DrawOrder({}), nullptr);
     DispatchGroup::Builder builder(recorder);
 
     // In total there are 25 resources that are used across the full pipeline stages. The sizes of
@@ -269,105 +316,144 @@ std::unique_ptr<DispatchGroup> VelloRenderer::renderScene(const RenderParams& pa
         return nullptr;
     }
 
+    // TODO(b/285189802): The default sizes for the bump buffers (~97MB) exceed Graphite's resource
+    // budget if multiple passes are necessary per frame (250MB, see ResouceCache.h). We apply a
+    // crude size reduction here which seems to be enough for a 4k x 4k atlas render for the GMs
+    // that we have tested. The numbers below are able to render GM_longpathdash with CPU-side
+    // stroke expansion.
+    //
+    // We need to come up with a better approach to accurately predict the sizes for these buffers
+    // based on the scene encoding and our resource budget. It should be possible to build a
+    // conservative estimate using the total number of path verbs, some heuristic based on the verb
+    // and the path's transform, and the total number of tiles.
+    //
+    // The following numbers amount to ~48MB
+    const size_t lines_size = bufferSizes.lines;
+    const size_t bin_data_size = bufferSizes.bin_data;
+    const size_t tiles_size = bufferSizes.tiles;
+    const size_t segments_size = bufferSizes.segments;
+    const size_t seg_counts_size = bufferSizes.seg_counts;
+    const size_t ptcl_size = bufferSizes.ptcl;
+
     // See the comments in VelloComputeSteps.h for an explanation of the logic here.
 
-    builder.assignSharedBuffer(configBuf, kVelloSlot_ConfigUniform);
-    builder.assignSharedBuffer(sceneBuf, kVelloSlot_Scene);
+    builder.assignSharedBuffer({configBuf, uboSize}, kVelloSlot_ConfigUniform);
+    builder.assignSharedBuffer({sceneBuf, sceneSize}, kVelloSlot_Scene);
 
     // path_reduce
-    auto pathtagReduceOutput = bufMgr->getStorage(bufferSizes.path_reduced);
-    auto tagmonoid = bufMgr->getStorage(bufferSizes.path_monoids);
+    auto pathtagReduceOutput = new_storage_slice(bufMgr, bufferSizes.path_reduced);
+    auto tagmonoid = new_storage_slice(bufMgr, bufferSizes.path_monoids);
     builder.assignSharedBuffer(pathtagReduceOutput, kVelloSlot_PathtagReduceOutput);
     builder.assignSharedBuffer(tagmonoid, kVelloSlot_TagMonoid);
-    builder.appendStep(&fPathtagReduce, placeholder, 0, to_wg_size(dispatchInfo.path_reduce));
+    builder.appendStep(&fPathtagReduce, to_wg_size(dispatchInfo.path_reduce));
 
     // If the input is too large to be fully processed by a single workgroup then a second reduce
     // step and two scan steps are necessary. Otherwise one reduce+scan pair is sufficient.
     //
     // In either case, the result is `tagmonoids`.
     if (dispatchInfo.use_large_path_scan) {
-        builder.assignSharedBuffer(bufMgr->getStorage(bufferSizes.path_reduced2),
+        builder.assignSharedBuffer(new_storage_slice(bufMgr, bufferSizes.path_reduced2),
                                    kVelloSlot_LargePathtagReduceSecondPassOutput);
-        builder.assignSharedBuffer(bufMgr->getStorage(bufferSizes.path_reduced_scan),
+        builder.assignSharedBuffer(new_storage_slice(bufMgr, bufferSizes.path_reduced_scan),
                                    kVelloSlot_LargePathtagScanFirstPassOutput);
-        builder.appendStep(&fPathtagReduce2, placeholder, 0, to_wg_size(dispatchInfo.path_reduce2));
-        builder.appendStep(&fPathtagScan1, placeholder, 0, to_wg_size(dispatchInfo.path_scan1));
-        builder.appendStep(&fPathtagScanLarge, placeholder, 0, to_wg_size(dispatchInfo.path_scan));
+        builder.appendStep(&fPathtagReduce2, to_wg_size(dispatchInfo.path_reduce2));
+        builder.appendStep(&fPathtagScan1, to_wg_size(dispatchInfo.path_scan1));
+        builder.appendStep(&fPathtagScanLarge, to_wg_size(dispatchInfo.path_scan));
     } else {
-        builder.appendStep(&fPathtagScanSmall, placeholder, 0, to_wg_size(dispatchInfo.path_scan));
+        builder.appendStep(&fPathtagScanSmall, to_wg_size(dispatchInfo.path_scan));
     }
 
     // bbox_clear
-    builder.assignSharedBuffer(bufMgr->getStorage(bufferSizes.path_bboxes), kVelloSlot_PathBBoxes);
-    builder.appendStep(&fBboxClear, placeholder, 0, to_wg_size(dispatchInfo.bbox_clear));
+    builder.assignSharedBuffer(new_storage_slice(bufMgr, bufferSizes.path_bboxes),
+                               kVelloSlot_PathBBoxes);
+    builder.appendStep(&fBboxClear, to_wg_size(dispatchInfo.bbox_clear));
 
-    // pathseg
-    builder.assignSharedBuffer(bufMgr->getStorage(bufferSizes.cubics), kVelloSlot_Cubics);
-    builder.appendStep(&fPathseg, placeholder, 0, to_wg_size(dispatchInfo.path_seg));
+    // flatten
+    builder.assignSharedBuffer(new_storage_slice(bufMgr, bufferSizes.bump_alloc, ClearBuffer::kYes),
+                               kVelloSlot_BumpAlloc);
+    builder.assignSharedBuffer(new_storage_slice(bufMgr, lines_size), kVelloSlot_Lines);
+    builder.appendStep(&fFlatten, to_wg_size(dispatchInfo.flatten));
 
     // draw_reduce
-    builder.assignSharedBuffer(bufMgr->getStorage(bufferSizes.draw_reduced),
+    builder.assignSharedBuffer(new_storage_slice(bufMgr, bufferSizes.draw_reduced),
                                kVelloSlot_DrawReduceOutput);
-    builder.appendStep(&fDrawReduce, placeholder, 0, to_wg_size(dispatchInfo.draw_reduce));
+    builder.appendStep(&fDrawReduce, to_wg_size(dispatchInfo.draw_reduce));
 
     // draw_leaf
-    builder.assignSharedBuffer(bufMgr->getStorage(bufferSizes.draw_monoids), kVelloSlot_DrawMonoid);
-    builder.assignSharedBuffer(bufMgr->getStorage(bufferSizes.bin_data), kVelloSlot_InfoBinData);
+    builder.assignSharedBuffer(new_storage_slice(bufMgr, bufferSizes.draw_monoids),
+                               kVelloSlot_DrawMonoid);
+    builder.assignSharedBuffer(new_storage_slice(bufMgr, bin_data_size), kVelloSlot_InfoBinData);
     // A clip input buffer must still get bound even if the encoding doesn't contain any clips
-    builder.assignSharedBuffer(bufMgr->getStorage(std::max(1u, bufferSizes.clip_inps)),
+    builder.assignSharedBuffer(new_storage_slice(bufMgr, bufferSizes.clip_inps),
                                kVelloSlot_ClipInput);
-    builder.appendStep(&fDrawLeaf, placeholder, 0, to_wg_size(dispatchInfo.draw_leaf));
+    builder.appendStep(&fDrawLeaf, to_wg_size(dispatchInfo.draw_leaf));
 
     // clip_reduce, clip_leaf
     // The clip bbox buffer is always an input to the binning stage, even when the encoding doesn't
     // contain any clips
-    builder.assignSharedBuffer(bufMgr->getStorage(std::max(1u, bufferSizes.clip_bboxes)),
+    builder.assignSharedBuffer(new_storage_slice(bufMgr, bufferSizes.clip_bboxes),
                                kVelloSlot_ClipBBoxes);
     WorkgroupSize clipReduceWgCount = to_wg_size(dispatchInfo.clip_reduce);
     WorkgroupSize clipLeafWgCount = to_wg_size(dispatchInfo.clip_leaf);
     bool doClipReduce = clipReduceWgCount.scalarSize() > 0u;
     bool doClipLeaf = clipLeafWgCount.scalarSize() > 0u;
     if (doClipReduce || doClipLeaf) {
-        builder.assignSharedBuffer(bufMgr->getStorage(std::max(1u, bufferSizes.clip_bics)),
+        builder.assignSharedBuffer(new_storage_slice(bufMgr, bufferSizes.clip_bics),
                                    kVelloSlot_ClipBicyclic);
-        builder.assignSharedBuffer(bufMgr->getStorage(bufferSizes.clip_els),
+        builder.assignSharedBuffer(new_storage_slice(bufMgr, bufferSizes.clip_els),
                                    kVelloSlot_ClipElement);
         if (doClipReduce) {
-            builder.appendStep(&fClipReduce, placeholder, 0, clipReduceWgCount);
+            builder.appendStep(&fClipReduce, clipReduceWgCount);
         }
         if (doClipLeaf) {
-            builder.appendStep(&fClipLeaf, placeholder, 0, clipLeafWgCount);
+            builder.appendStep(&fClipLeaf, clipLeafWgCount);
         }
     }
 
     // binning
-    builder.assignSharedBuffer(bufMgr->getStorage(bufferSizes.draw_bboxes), kVelloSlot_DrawBBoxes);
-    builder.assignSharedBuffer(bufMgr->getStorage(bufferSizes.bump_alloc, ClearBuffer::kYes),
-                               kVelloSlot_BumpAlloc);
-    builder.assignSharedBuffer(bufMgr->getStorage(bufferSizes.bin_headers), kVelloSlot_BinHeader);
-    builder.appendStep(&fBinning, placeholder, 0, to_wg_size(dispatchInfo.binning));
+    builder.assignSharedBuffer(new_storage_slice(bufMgr, bufferSizes.draw_bboxes),
+                               kVelloSlot_DrawBBoxes);
+    builder.assignSharedBuffer(new_storage_slice(bufMgr, bufferSizes.bin_headers),
+                               kVelloSlot_BinHeader);
+    builder.appendStep(&fBinning, to_wg_size(dispatchInfo.binning));
 
     // tile_alloc
-    builder.assignSharedBuffer(bufMgr->getStorage(bufferSizes.paths), kVelloSlot_Path);
-    builder.assignSharedBuffer(bufMgr->getStorage(bufferSizes.tiles), kVelloSlot_Tile);
-    builder.appendStep(&fTileAlloc, placeholder, 0, to_wg_size(dispatchInfo.tile_alloc));
+    builder.assignSharedBuffer(new_storage_slice(bufMgr, bufferSizes.paths), kVelloSlot_Path);
+    builder.assignSharedBuffer(new_storage_slice(bufMgr, tiles_size), kVelloSlot_Tile);
+    builder.appendStep(&fTileAlloc, to_wg_size(dispatchInfo.tile_alloc));
 
-    // path_coarse
-    builder.assignSharedBuffer(bufMgr->getStorage(bufferSizes.segments), kVelloSlot_Segments);
-    builder.appendStep(&fPathCoarseFull, placeholder, 0, to_wg_size(dispatchInfo.path_coarse));
+    // path_count_setup
+    auto indirectCountBuffer = new_indirect_slice(bufMgr, bufferSizes.indirect_count);
+    builder.assignSharedBuffer(indirectCountBuffer, kVelloSlot_IndirectCount);
+    builder.appendStep(&fPathCountSetup, to_wg_size(dispatchInfo.path_count_setup));
+
+    // path_count
+    builder.assignSharedBuffer(new_storage_slice(bufMgr, seg_counts_size),
+                               kVelloSlot_SegmentCounts);
+    builder.appendStepIndirect(&fPathCount, indirectCountBuffer);
 
     // backdrop
-    builder.appendStep(&fBackdropDyn, placeholder, 0, to_wg_size(dispatchInfo.backdrop));
+    builder.appendStep(&fBackdrop, to_wg_size(dispatchInfo.backdrop));
 
     // coarse
-    builder.assignSharedBuffer(bufMgr->getStorage(bufferSizes.ptcl), kVelloSlot_PTCL);
-    builder.appendStep(&fCoarse, placeholder, 0, to_wg_size(dispatchInfo.coarse));
+    builder.assignSharedBuffer(new_storage_slice(bufMgr, ptcl_size), kVelloSlot_PTCL);
+    builder.appendStep(&fCoarse, to_wg_size(dispatchInfo.coarse));
+
+    // path_tiling_setup
+    builder.appendStep(&fPathTilingSetup, to_wg_size(dispatchInfo.path_tiling_setup));
+
+    // path_tiling
+    builder.assignSharedBuffer(new_storage_slice(bufMgr, segments_size), kVelloSlot_Segments);
+    builder.appendStepIndirect(&fPathTiling, indirectCountBuffer);
 
     // fine
     builder.assignSharedTexture(fImageAtlas, kVelloSlot_ImageAtlas);
     builder.assignSharedTexture(fGradientImage, kVelloSlot_GradientImage);
     builder.assignSharedTexture(std::move(target), kVelloSlot_OutputImage);
-    builder.appendStep(&fFine, placeholder, 0, to_wg_size(dispatchInfo.fine));
+    const ComputeStep* fineVariant = params.fAaConfig == VelloAaConfig::kMSAA16
+                                             ? static_cast<const ComputeStep*>(&fFineMsaa16)
+                                             : static_cast<const ComputeStep*>(&fFineArea);
+    builder.appendStep(fineVariant, to_wg_size(dispatchInfo.fine));
 
     return builder.finalize();
 }

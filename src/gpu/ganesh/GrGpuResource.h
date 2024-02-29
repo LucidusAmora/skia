@@ -19,6 +19,10 @@ class GrGpu;
 class GrResourceCache;
 class SkTraceMemoryDump;
 
+#if defined(GR_TEST_UTILS)
+class GrSurface;
+#endif
+
 /**
  * Base class for GrGpuResource. Provides the hooks for resources to interact with the cache.
  * Separated out as a base class to isolate the ref-cnting behavior and provide friendship without
@@ -53,19 +57,19 @@ public:
         }
     }
 
-    void addCommandBufferUsage() const {
+    void refCommandBuffer() const {
         // No barrier required.
         (void)fCommandBufferUsageCnt.fetch_add(+1, std::memory_order_relaxed);
     }
 
-    void removeCommandBufferUsage() const {
+    void unrefCommandBuffer() const {
         SkASSERT(!this->hasNoCommandBufferUsages());
         if (1 == fCommandBufferUsageCnt.fetch_add(-1, std::memory_order_acq_rel)) {
             this->notifyWillBeZero(LastRemovedRef::kCommandBufferUsage);
         }
     }
 
-#if GR_TEST_UTILS
+#if defined(GR_TEST_UTILS)
     int32_t testingOnly_getRefCnt() const { return this->getRefCnt(); }
 #endif
 
@@ -221,6 +225,10 @@ public:
     virtual const char* getResourceType() const = 0;
 
     static uint32_t CreateUniqueID();
+
+#if defined(GR_TEST_UTILS)
+    virtual const GrSurface* asSurface() const { return nullptr; }
+#endif
 
 protected:
     // This must be called by every non-wrapped GrGpuObject. It should be called once the object is

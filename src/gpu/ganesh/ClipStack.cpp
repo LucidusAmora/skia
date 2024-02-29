@@ -10,7 +10,6 @@
 #include "include/core/SkColorSpace.h"
 #include "include/core/SkMatrix.h"
 #include "src/base/SkVx.h"
-#include "src/core/SkMatrixProvider.h"
 #include "src/core/SkPathPriv.h"
 #include "src/core/SkRRectPriv.h"
 #include "src/core/SkRectPriv.h"
@@ -20,6 +19,7 @@
 #include "src/gpu/ganesh/GrDirectContextPriv.h"
 #include "src/gpu/ganesh/GrFPArgs.h"
 #include "src/gpu/ganesh/GrFragmentProcessor.h"
+#include "src/gpu/ganesh/GrFragmentProcessors.h"
 #include "src/gpu/ganesh/GrProxyProvider.h"
 #include "src/gpu/ganesh/GrRecordingContextPriv.h"
 #include "src/gpu/ganesh/GrSWMaskHelper.h"
@@ -334,7 +334,7 @@ GrSurfaceProxyView render_sw_mask(GrRecordingContext* context,
                                                 bounds.size(),
                                                 GrRenderable::kNo,
                                                 1,
-                                                GrMipmapped::kNo,
+                                                skgpu::Mipmapped::kNo,
                                                 SkBackingFit::kApprox,
                                                 skgpu::Budgeted::kYes,
                                                 GrProtected::kNo,
@@ -1144,14 +1144,13 @@ static constexpr int kMaxAnalyticFPs = 4;
 // across our set of GMs, SKPs, and SVGs used for testing.
 static constexpr int kNumStackMasks = 4;
 
-ClipStack::ClipStack(const SkIRect& deviceBounds, const SkMatrixProvider* matrixProvider,
-                     bool forceAA)
+ClipStack::ClipStack(const SkIRect& deviceBounds, const SkMatrix* ctm, bool forceAA)
         : fElements(kElementStackIncrement)
         , fSaves(kSaveStackIncrement)
         , fMasks(kMaskStackIncrement)
         , fProxyProvider(nullptr)
         , fDeviceBounds(deviceBounds)
-        , fMatrixProvider(matrixProvider)
+        , fCTM(ctm)
         , fForceAA(forceAA) {
     // Start with a save record that is wide open
     fSaves.emplace_back(deviceBounds);
@@ -1300,9 +1299,9 @@ GrClip::Effect ClipStack::apply(GrRecordingContext* rContext,
     if (cs.shader()) {
         static const GrColorInfo kCoverageColorInfo{GrColorType::kUnknown, kPremul_SkAlphaType,
                                                     nullptr};
-        GrFPArgs args(rContext, &kCoverageColorInfo, sdc->surfaceProps());
-        clipFP = as_SB(cs.shader())->asRootFragmentProcessor(args,
-                                                             fMatrixProvider->localToDevice());
+        GrFPArgs args(
+                rContext, &kCoverageColorInfo, sdc->surfaceProps(), GrFPArgs::Scope::kDefault);
+        clipFP = GrFragmentProcessors::Make(cs.shader(), args, *fCTM);
         if (clipFP) {
             // The initial input is the coverage from the geometry processor, so this ensures it
             // is multiplied properly with the alpha of the clip shader.

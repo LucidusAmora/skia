@@ -12,7 +12,8 @@
 #include "include/core/SkSurface.h"
 #include "include/gpu/GrDirectContext.h"
 #include "src/gpu/AtlasTypes.h"
-#include "src/gpu/ganesh/Device_v1.h"
+#include "src/gpu/ganesh/Device.h"
+#include "src/gpu/ganesh/GrGpu.h"
 #include "src/gpu/ganesh/GrRecordingContextPriv.h"
 
 class GrAtlasManager;
@@ -25,7 +26,7 @@ class GrRenderTargetProxy;
 class GrSemaphore;
 class GrSurfaceProxy;
 
-class SkDeferredDisplayList;
+class GrDeferredDisplayList;
 class SkTaskGroup;
 
 /** Class that adds methods to GrDirectContext that are only intended for use internal to Skia.
@@ -33,6 +34,22 @@ class SkTaskGroup;
     data members or virtual methods. */
 class GrDirectContextPriv : public GrRecordingContextPriv {
 public:
+    static sk_sp<GrDirectContext> Make(GrBackendApi backend,
+                                       const GrContextOptions& options,
+                                       sk_sp<GrContextThreadSafeProxy> proxy) {
+        return sk_sp<GrDirectContext>(new GrDirectContext(backend, options, std::move(proxy)));
+    }
+
+    static bool Init(const sk_sp<GrDirectContext>& ctx) {
+        SkASSERT(ctx);
+        return ctx->init();
+    }
+
+    static void SetGpu(const sk_sp<GrDirectContext>& ctx, std::unique_ptr<GrGpu> gpu) {
+        SkASSERT(ctx);
+        ctx->fGpu = std::move(gpu);
+    }
+
     GrDirectContext* context() { return static_cast<GrDirectContext*>(fContext); }
     const GrDirectContext* context() const { return static_cast<const GrDirectContext*>(fContext); }
 
@@ -49,17 +66,17 @@ public:
      * surface or using it as a texture.
      */
     GrSemaphoresSubmitted flushSurfaces(
-                SkSpan<GrSurfaceProxy*>,
-                SkSurface::BackendSurfaceAccess = SkSurface::BackendSurfaceAccess::kNoAccess,
-                const GrFlushInfo& = {},
-                const skgpu::MutableTextureState* newState = nullptr);
+            SkSpan<GrSurfaceProxy*>,
+            SkSurfaces::BackendSurfaceAccess = SkSurfaces::BackendSurfaceAccess::kNoAccess,
+            const GrFlushInfo& = {},
+            const skgpu::MutableTextureState* newState = nullptr);
 
     /** Version of above that flushes for a single proxy. Null is allowed. */
     GrSemaphoresSubmitted flushSurface(
-                GrSurfaceProxy* proxy,
-                SkSurface::BackendSurfaceAccess access = SkSurface::BackendSurfaceAccess::kNoAccess,
-                const GrFlushInfo& info = {},
-                const skgpu::MutableTextureState* newState = nullptr) {
+            GrSurfaceProxy* proxy,
+            SkSurfaces::BackendSurfaceAccess access = SkSurfaces::BackendSurfaceAccess::kNoAccess,
+            const GrFlushInfo& info = {},
+            const skgpu::MutableTextureState* newState = nullptr) {
         size_t size = proxy ? 1 : 0;
         return this->flushSurfaces({&proxy, size}, access, info, newState);
     }
@@ -100,9 +117,8 @@ public:
     }
 #endif
 
-    void createDDLTask(sk_sp<const SkDeferredDisplayList>,
-                       sk_sp<GrRenderTargetProxy> newDest,
-                       SkIPoint offset);
+    void createDDLTask(sk_sp<const GrDeferredDisplayList>,
+                       sk_sp<GrRenderTargetProxy> newDest);
 
     bool compile(const GrProgramDesc&, const GrProgramInfo&);
 
@@ -123,7 +139,7 @@ public:
         }
     }
 
-#if GR_TEST_UTILS
+#if defined(GR_TEST_UTILS)
     /** Reset GPU stats */
     void resetGpuStats() const;
 

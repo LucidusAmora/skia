@@ -11,11 +11,13 @@
 #include "include/gpu/GrBackendSurface.h"
 #include "include/gpu/GrDirectContext.h"
 #include "include/gpu/ganesh/SkSurfaceGanesh.h"
+#include "include/gpu/ganesh/gl/GrGLBackendSurface.h"
 #include "src/base/SkMathPriv.h"
 #include "src/gpu/ganesh/GrCaps.h"
 #include "src/gpu/ganesh/GrDirectContextPriv.h"
-#include "src/gpu/ganesh/gl/GrGLDefines_impl.h"
+#include "src/gpu/ganesh/gl/GrGLDefines.h"
 #include "src/gpu/ganesh/gl/GrGLUtil.h"
+#include "include/gpu/ganesh/gl/GrGLDirectContext.h"
 #include "src/image/SkImage_Base.h"
 
 namespace skwindow::internal {
@@ -32,7 +34,7 @@ void GLWindowContext::initializeContext() {
 
     fBackendContext = this->onInitializeContext();
 
-    fContext = GrDirectContext::MakeGL(fBackendContext, fDisplayParams.fGrContextOptions);
+    fContext = GrDirectContexts::MakeGL(fBackendContext, fDisplayParams.fGrContextOptions);
     if (!fContext && fDisplayParams.fMSAASampleCount > 1) {
         fDisplayParams.fMSAASampleCount /= 2;
         this->initializeContext();
@@ -63,13 +65,13 @@ sk_sp<SkSurface> GLWindowContext::getBackbufferSurface() {
             GrGLFramebufferInfo fbInfo;
             fbInfo.fFBOID = buffer;
             fbInfo.fFormat = GR_GL_RGBA8;
-            fbInfo.fProtected = skgpu::Protected::kNo;
+            fbInfo.fProtected = skgpu::Protected(fDisplayParams.fCreateProtectedNativeBackend);
 
-            GrBackendRenderTarget backendRT(fWidth,
-                                            fHeight,
-                                            fSampleCount,
-                                            fStencilBits,
-                                            fbInfo);
+            auto backendRT = GrBackendRenderTargets::MakeGL(fWidth,
+                                                            fHeight,
+                                                            fSampleCount,
+                                                            fStencilBits,
+                                                            fbInfo);
 
             fSurface = SkSurfaces::WrapBackendRenderTarget(fContext.get(),
                                                            backendRT,

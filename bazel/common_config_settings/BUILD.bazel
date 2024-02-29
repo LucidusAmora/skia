@@ -209,11 +209,6 @@ bool_flag(
 )
 
 bool_flag(
-    name = "enable_sksl_in_raster_pipeline",
-    default = True,
-)
-
-bool_flag(
     name = "use_harfbuzz",
     default = False,
 )
@@ -225,6 +220,11 @@ bool_flag(
 
 bool_flag(
     name = "use_icu",
+    default = False,
+)
+
+bool_flag(
+    name = "build_for_debugger",
     default = False,
 )
 
@@ -276,4 +276,28 @@ selects.config_setting_group(
         ":fci_fontmgr",
         ":fci_fontmgr_factory",
     ],
+)
+
+# Convenience condition that is always true. This condition is satisfied if an arbitrarily chosen
+# boolean built-in flag (https://bazel.build/docs/user-manual#stamp) is either true or false.
+#
+# Inspired by
+# https://github.com/bazelbuild/bazel-skylib/blob/2f0bb4cec0297bb38f830a72fa8961bee057c3cd/lib/selects.bzl#L227.
+selects.config_setting_group(
+    name = "always_true",
+    match_any = [
+        ":always_true_0",
+        ":always_true_1",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "always_true_0",
+    values = {"stamp": "0"},
+)
+
+config_setting(
+    name = "always_true_1",
+    values = {"stamp": "1"},
 )

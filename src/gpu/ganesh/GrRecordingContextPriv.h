@@ -12,12 +12,13 @@
 #include "include/core/SkTypes.h"
 #include "include/gpu/GrRecordingContext.h"
 #include "src/gpu/RefCntedCallback.h"
-#include "src/gpu/ganesh/Device_v1.h"
+#include "src/gpu/SkBackingFit.h"
+#include "src/gpu/ganesh/Device.h"
 #include "src/gpu/ganesh/GrImageContextPriv.h"
 #include "src/text/gpu/SDFTControl.h"
 
 class GrImageInfo;
-class SkDeferredDisplayList;
+class GrDeferredDisplayList;
 namespace skgpu {
     class Swizzle;
 }
@@ -63,7 +64,7 @@ public:
 
     GrThreadSafeCache* threadSafeCache() { return this->context()->threadSafeCache(); }
 
-    void moveRenderTasksToDDL(SkDeferredDisplayList*);
+    void moveRenderTasksToDDL(GrDeferredDisplayList*);
 
     /**
      * Registers an object for flush-related callbacks. (See GrOnFlushCallbackObject.)
@@ -75,7 +76,7 @@ public:
 
     GrAuditTrail* auditTrail() { return this->context()->fAuditTrail.get(); }
 
-#if GR_TEST_UTILS
+#if defined(GR_TEST_UTILS)
     // Used by tests that intentionally exercise codepaths that print warning messages, in order to
     // not confuse users with output that looks like a testing failure.
     class AutoSuppressWarningMessages {
@@ -94,7 +95,7 @@ public:
 #endif
 
     void printWarningMessage(const char* msg) const {
-#if GR_TEST_UTILS
+#if defined(GR_TEST_UTILS)
         if (this->context()->fSuppressWarningMessages > 0) {
             return;
         }
@@ -106,7 +107,7 @@ public:
         return &this->context()->fStats;
     }
 
-#if GR_GPU_STATS && GR_TEST_UTILS
+#if GR_GPU_STATS && defined(GR_TEST_UTILS)
     using DMSAAStats = GrRecordingContext::DMSAAStats;
     DMSAAStats& dmsaaStats() { return this->context()->fDMSAAStats; }
 #endif
@@ -192,10 +193,10 @@ public:
      */
     std::unique_ptr<skgpu::ganesh::SurfaceFillContext> makeSFCWithFallback(
             GrImageInfo,
-            SkBackingFit = SkBackingFit::kExact,
-            int sampleCount = 1,
-            skgpu::Mipmapped = skgpu::Mipmapped::kNo,
-            skgpu::Protected = skgpu::Protected::kNo,
+            SkBackingFit,
+            int sampleCount,
+            skgpu::Mipmapped,
+            skgpu::Protected,
             GrSurfaceOrigin = kTopLeft_GrSurfaceOrigin,
             skgpu::Budgeted = skgpu::Budgeted::kYes);
 

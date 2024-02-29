@@ -9,15 +9,21 @@ skia_filegroup(
     srcs = [
         "SkAndroidFrameworkUtils.h",
         "SkAnimatedImage.h",
-    ] + select({
-        "//src/gpu:has_gpu_backend": ["SkSurfaceAndroid.h"],
-        "//conditions:default": [],
-    }),
+    ],
     visibility = ["//include:__pkg__"],
 )
 
 skia_filegroup(
     name = "private_hdrs",
-    srcs = ["SkImageAndroid.h"],
-    visibility = ["//include:__pkg__"],
+    srcs = [
+        "AHardwareBufferUtils.h",
+        "GrAHardwareBufferUtils.h",
+        "SkCanvasAndroid.h",
+        "SkImageAndroid.h",
+        "SkSurfaceAndroid.h",
+    ],
+    visibility = [
+        "//include:__pkg__",
+        "//src/gpu/ganesh:__pkg__",
+    ],
 )

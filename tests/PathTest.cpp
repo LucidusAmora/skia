@@ -36,7 +36,6 @@
 #include "include/private/base/SkFloatBits.h"
 #include "include/private/base/SkFloatingPoint.h"
 #include "include/private/base/SkMalloc.h"
-#include "include/private/base/SkPathEnums.h"
 #include "include/private/base/SkTo.h"
 #include "include/utils/SkNullCanvas.h"
 #include "include/utils/SkParse.h"
@@ -44,10 +43,12 @@
 #include "src/base/SkAutoMalloc.h"
 #include "src/base/SkRandom.h"
 #include "src/core/SkGeometry.h"
+#include "src/core/SkPathEnums.h"
 #include "src/core/SkPathPriv.h"
 #include "src/core/SkReadBuffer.h"
 #include "src/core/SkWriteBuffer.h"
 #include "tests/Test.h"
+#include "tools/fonts/FontToolUtils.h"
 
 #include <algorithm>
 #include <cfloat>
@@ -1562,6 +1563,45 @@ static void test_convexity_doubleback(skiatest::Reporter* reporter) {
     check_convexity(reporter, doubleback, true);
     doubleback.quadTo(1, 0, 0, 0);
     check_convexity(reporter, doubleback, true);
+
+    doubleback.reset();
+    doubleback.lineTo(1, 0);
+    doubleback.lineTo(1, 0);
+    doubleback.lineTo(1, 1);
+    doubleback.lineTo(1, 1);
+    doubleback.lineTo(1, 0);
+    check_convexity(reporter, doubleback, false);
+
+    doubleback.reset();
+    doubleback.lineTo(-1, 0);
+    doubleback.lineTo(-1, 1);
+    doubleback.lineTo(-1, 0);
+    check_convexity(reporter, doubleback, false);
+
+    for (int i = 0; i < 4; ++i) {
+        doubleback.reset();
+        doubleback.moveTo(0, 0);
+        if (i == 0) {
+            doubleback.lineTo(-1, -1);
+            doubleback.lineTo(0, 0);
+        }
+        doubleback.lineTo(0, 1);
+        if (i == 1) {
+            doubleback.lineTo(0, 2);
+            doubleback.lineTo(0, 1);
+        }
+        doubleback.lineTo(1, 1);
+        if (i == 2) {
+            doubleback.lineTo(2, 2);
+            doubleback.lineTo(1, 1);
+        }
+        doubleback.lineTo(0, 0);
+        if (i == 3) {
+            doubleback.lineTo(-1, -1);
+            doubleback.lineTo(0, 0);
+        }
+        check_convexity(reporter, doubleback, false);
+    }
 }
 
 static void check_convex_bounds(skiatest::Reporter* reporter, const SkPath& p,
@@ -2624,7 +2664,7 @@ static void test_isNestedFillRects(skiatest::Reporter* reporter) {
 
 static void write_and_read_back(skiatest::Reporter* reporter,
                                 const SkPath& p) {
-    SkBinaryWriteBuffer writer;
+    SkBinaryWriteBuffer writer({});
     writer.writePath(p);
     size_t size = writer.bytesWritten();
     SkAutoMalloc storage(size);
@@ -5660,11 +5700,11 @@ DEF_TEST(path_last_move_to_index, r) {
     constexpr size_t len = sizeof(text) - 1;
     SkGlyphID glyphs[len];
 
-    SkFont font;
+    SkFont font = ToolUtils::DefaultFont();
     font.textToGlyphs(text, len, SkTextEncoding::kUTF8, glyphs, len);
 
     SkPath copyPath;
-    SkFont().getPaths(glyphs, len, [](const SkPath* src, const SkMatrix& mx, void* ctx) {
+    font.getPaths(glyphs, len, [](const SkPath* src, const SkMatrix& mx, void* ctx) {
         if (src) {
             ((SkPath*)ctx)->addPath(*src, mx);
         }
@@ -5810,20 +5850,38 @@ static void test_addPath_and_injected_moveTo(skiatest::Reporter* reporter) {
     };
 
     SkPath path1;
-    SkPath path2;
-
     path1.moveTo(230, 230); // Needed to show the bug: a moveTo before the addRect
+    path1.moveTo(20,30).lineTo(40,30).lineTo(40,50).lineTo(20,50);
+    SkPath path1c(path1);
+    path1c.close();
 
-    // add a rect, but the shape doesn't really matter
-    path1.moveTo(20,30).lineTo(40,30).lineTo(40,50).lineTo(20,50).close();
+    SkPath path2;
+    // If path2 contains zero points, the update calculation isn't tested.
+    path2.moveTo(144, 72);
+    path2.lineTo(146, 72);
+    SkPath path2c(path2);
+    path2c.close();
+    SkPath path3(path2);
+    SkPath path3c(path2c);
 
-    path2.addPath(path1);   // this must correctly update its "last-move-to" so that when
-                            // lineTo is called, it will inject the correct moveTo.
-
-    // at this point, path1 and path2 should be the same...
-
-    test_before_after_lineto(path1, {20,50}, {20,30});
+    // Test addPath, adding a path that ends with close.
+    // The start point of the last contour added,
+    // and the internal flag tracking whether it is closed,
+    // must be updated correctly.
+    path2.addPath(path1c);
+    path2c.addPath(path1c);
+    // At this point, path1c, path2, and path2c should end the same way.
+    test_before_after_lineto(path1c, {20,50}, {20,30});
     test_before_after_lineto(path2, {20,50}, {20,30});
+    test_before_after_lineto(path2c, {20,50}, {20,30});
+
+    // Test addPath, adding a path not ending in close.
+    path3.addPath(path1);
+    path3c.addPath(path1);
+    // At this point, path1, path3, and path3c should end the same way.
+    test_before_after_lineto(path1, {20,50}, {20,50});
+    test_before_after_lineto(path3, {20,50}, {20,50});
+    test_before_after_lineto(path3c, {20,50}, {20,50});
 }
 
 DEF_TEST(pathedger, r) {
@@ -5847,13 +5905,28 @@ DEF_TEST(pathedger, r) {
 }
 
 DEF_TEST(path_addpath_crbug_1153516, r) {
-    // When we add a path to another path, we need to sniff out in case the argument ended
-    // with a kClose, in which case we need to fiddle with our lastMoveIndex (as ::close() does)
+    // When we add a closed path to another path, verify
+    // that the result has the right value for last contour start point.
     SkPath p1, p2;
+    p2.lineTo(10,20);
     p1.addRect({143,226,200,241});
+    p2.addPath(p1);
+    p2.lineTo(262,513); // this should not assert
+    SkPoint rectangleStart = {143, 226};
+    SkPoint lineEnd = {262, 513};
+    SkPoint actualMoveTo = p2.getPoint(p2.countPoints() - 2);
+    REPORTER_ASSERT(r, actualMoveTo == rectangleStart );
+    SkPoint actualLineTo = p2.getPoint(p2.countPoints() - 1);
+    REPORTER_ASSERT(r, actualLineTo == lineEnd);
+
+    // Verify adding a closed path to itself
     p1.addPath(p1);
-    p1.lineTo(262,513); // this should not assert
-}
+    p1.lineTo(262,513);
+    actualMoveTo = p1.getPoint(p1.countPoints() - 2);
+    REPORTER_ASSERT(r, actualMoveTo == rectangleStart );
+    actualLineTo = p1.getPoint(p1.countPoints() - 1);
+    REPORTER_ASSERT(r, actualLineTo == lineEnd);
+ }
 
 DEF_TEST(path_convexity_scale_way_down, r) {
     SkPath path = SkPathBuilder().moveTo(0,0).lineTo(1, 0)

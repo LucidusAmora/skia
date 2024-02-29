@@ -17,8 +17,9 @@
 #include "include/gpu/graphite/Recording.h"
 #include "include/gpu/graphite/Surface.h"
 #include "src/core/SkCanvasPriv.h"
+#include "src/gpu/graphite/Caps.h"
+#include "src/gpu/graphite/ContextPriv.h"
 #include "src/gpu/graphite/Device.h"
-#include "src/gpu/graphite/ImageUtils.h"
 #include "src/gpu/graphite/RecorderPriv.h"
 #include "src/gpu/graphite/Resource.h"
 #include "src/gpu/graphite/ResourceCache.h"
@@ -26,8 +27,10 @@
 #include "src/gpu/graphite/SharedContext.h"
 #include "src/gpu/graphite/Texture.h"
 #include "src/gpu/graphite/TextureProxyView.h"
+#include "src/gpu/graphite/TextureUtils.h"
 #include "src/image/SkImage_Base.h"
 #include "tools/Resources.h"
+#include "tools/graphite/GraphiteTestContext.h"
 
 namespace skgpu::graphite {
 
@@ -53,6 +56,8 @@ public:
         return resource;
     }
 
+    const char* getResourceType() const override { return "Test Resource"; }
+
     static void CreateKey(GraphiteResourceKey* key, Shareable shareable) {
         // Internally we assert that we don't make the same key twice where the only difference is
         // shareable vs non-shareable. That allows us to now have Shareable be part of the Key's
@@ -68,7 +73,11 @@ private:
                  Ownership owned,
                  skgpu::Budgeted budgeted,
                  size_t gpuMemorySize)
-            : Resource(sharedContext, owned, budgeted, gpuMemorySize) {}
+            : Resource(sharedContext,
+                       owned,
+                       budgeted,
+                       gpuMemorySize,
+                       	/*label=*/"TestResource") {}
 
     void freeGpuData() override {}
 };
@@ -85,7 +94,19 @@ static sk_sp<SkData> create_image_data(const SkImageInfo& info) {
     return data;
 }
 
-DEF_GRAPHITE_TEST_FOR_ALL_CONTEXTS(GraphiteBudgetedResourcesTest, reporter, context) {
+static skgpu::graphite::TextureProxy* top_device_graphite_target_proxy(SkCanvas* canvas) {
+    if (auto gpuDevice = SkCanvasPriv::TopDevice(canvas)->asGraphiteDevice()) {
+        return gpuDevice->target();
+    }
+    return nullptr;
+}
+
+DEF_CONDITIONAL_GRAPHITE_TEST_FOR_ALL_CONTEXTS(GraphiteBudgetedResourcesTest,
+                                               reporter,
+                                               context,
+                                               testContext,
+                                               true,
+                                               CtsEnforcement::kNextRelease) {
     std::unique_ptr<Recorder> recorder = context->makeRecorder();
     ResourceProvider* resourceProvider = recorder->priv().resourceProvider();
     ResourceCache* resourceCache = resourceProvider->resourceCache();
@@ -132,7 +153,7 @@ DEF_GRAPHITE_TEST_FOR_ALL_CONTEXTS(GraphiteBudgetedResourcesTest, reporter, cont
     resourcePtr2->unref();
     resourceCache->forceProcessReturnedResources();
 
-    // Test making a non budgeted, non shareable resource.
+    // Test making a budgeted, shareable resource.
     resource = TestResource::Make(
             sharedContext, Ownership::kOwned, skgpu::Budgeted::kYes, Shareable::kYes);
     if (!resource) {
@@ -202,13 +223,16 @@ DEF_GRAPHITE_TEST_FOR_ALL_CONTEXTS(GraphiteBudgetedResourcesTest, reporter, cont
     InsertRecordingInfo insertInfo;
     insertInfo.fRecording = recording.get();
     context->insertRecording(insertInfo);
-    context->submit(SyncToCpu::kYes);
+    testContext->syncedSubmit(context);
     recording.reset();
     imageGpu.reset();
     resourceCache->forceProcessReturnedResources();
 
     REPORTER_ASSERT(reporter, resourceCache->getResourceCount() == 4);
-    REPORTER_ASSERT(reporter, resourceCache->numFindableResources() == 4);
+    // Remapping async buffers before returning them to the cache can extend buffer lifetime.
+    if (!context->priv().caps()->bufferMapsAreAsync()) {
+        REPORTER_ASSERT(reporter, resourceCache->numFindableResources() == 4);
+    }
     REPORTER_ASSERT(reporter, imageResourcePtr->budgeted() == skgpu::Budgeted::kYes);
 
     // Now try an SkSurface. This is simpler since we can directly create Graphite SkSurface's.
@@ -218,7 +242,7 @@ DEF_GRAPHITE_TEST_FOR_ALL_CONTEXTS(GraphiteBudgetedResourcesTest, reporter, cont
         return;
     }
 
-    TextureProxy* surfaceProxy = SkCanvasPriv::TopDeviceGraphiteTargetProxy(surface->getCanvas());
+    TextureProxy* surfaceProxy = top_device_graphite_target_proxy(surface->getCanvas());
     if (!surfaceProxy) {
         ERRORF(reporter, "Failed to get surface proxy");
         return;
@@ -232,7 +256,10 @@ DEF_GRAPHITE_TEST_FOR_ALL_CONTEXTS(GraphiteBudgetedResourcesTest, reporter, cont
     const Resource* surfaceResourcePtr = surfaceProxy->texture();
 
     REPORTER_ASSERT(reporter, resourceCache->getResourceCount() == 5);
-    REPORTER_ASSERT(reporter, resourceCache->numFindableResources() == 4);
+    // Remapping async buffers before returning them to the cache can extend buffer lifetime.
+    if (!context->priv().caps()->bufferMapsAreAsync()) {
+        REPORTER_ASSERT(reporter, resourceCache->numFindableResources() == 4);
+    }
     REPORTER_ASSERT(reporter, surfaceResourcePtr->budgeted() == skgpu::Budgeted::kNo);
 
     // The creation of the surface may have added an initial clear to it. Thus if we just reset the
@@ -241,7 +268,7 @@ DEF_GRAPHITE_TEST_FOR_ALL_CONTEXTS(GraphiteBudgetedResourcesTest, reporter, cont
     recording = recorder->snap();
     insertInfo.fRecording = recording.get();
     context->insertRecording(insertInfo);
-    context->submit(SyncToCpu::kYes);
+    testContext->syncedSubmit(context);
     recording.reset();
 
     surface.reset();
@@ -265,7 +292,7 @@ sk_sp<Resource> add_new_resource(skiatest::Reporter* reporter,
         return nullptr;
     }
     resourceCache->insertResource(resource.get());
-    return std::move(resource);
+    return resource;
 }
 
 Resource* add_new_purgeable_resource(skiatest::Reporter* reporter,
@@ -284,7 +311,8 @@ Resource* add_new_purgeable_resource(skiatest::Reporter* reporter,
 }
 } // namespace
 
-DEF_GRAPHITE_TEST_FOR_ALL_CONTEXTS(GraphitePurgeAsNeededResourcesTest, reporter, context) {
+DEF_GRAPHITE_TEST_FOR_ALL_CONTEXTS(GraphitePurgeAsNeededResourcesTest, reporter, context,
+                                   CtsEnforcement::kNextRelease) {
     std::unique_ptr<Recorder> recorder = context->makeRecorder();
     ResourceProvider* resourceProvider = recorder->priv().resourceProvider();
     ResourceCache* resourceCache = resourceProvider->resourceCache();
@@ -410,7 +438,8 @@ DEF_GRAPHITE_TEST_FOR_ALL_CONTEXTS(GraphitePurgeAsNeededResourcesTest, reporter,
     REPORTER_ASSERT(reporter, resourceCache->currentBudgetedBytes() == 0);
 }
 
-DEF_GRAPHITE_TEST_FOR_ALL_CONTEXTS(GraphiteZeroSizedResourcesTest, reporter, context) {
+DEF_GRAPHITE_TEST_FOR_ALL_CONTEXTS(GraphiteZeroSizedResourcesTest, reporter, context,
+                                   CtsEnforcement::kNextRelease) {
     std::unique_ptr<Recorder> recorder = context->makeRecorder();
     ResourceProvider* resourceProvider = recorder->priv().resourceProvider();
     ResourceCache* resourceCache = resourceProvider->resourceCache();
@@ -496,7 +525,8 @@ DEF_GRAPHITE_TEST_FOR_ALL_CONTEXTS(GraphiteZeroSizedResourcesTest, reporter, con
     REPORTER_ASSERT(reporter, resourceCache->topOfPurgeableQueue()->gpuMemorySize() == 0);
 }
 
-DEF_GRAPHITE_TEST_FOR_ALL_CONTEXTS(GraphitePurgeNotUsedSinceResourcesTest, reporter, context) {
+DEF_GRAPHITE_TEST_FOR_ALL_CONTEXTS(GraphitePurgeNotUsedSinceResourcesTest, reporter, context,
+                                   CtsEnforcement::kNextRelease) {
     std::unique_ptr<Recorder> recorder = context->makeRecorder();
     ResourceProvider* resourceProvider = recorder->priv().resourceProvider();
     ResourceCache* resourceCache = resourceProvider->resourceCache();
@@ -586,7 +616,8 @@ DEF_GRAPHITE_TEST_FOR_ALL_CONTEXTS(GraphitePurgeNotUsedSinceResourcesTest, repor
 // This test is used to check the case where we call purgeNotUsedSince, which triggers us to return
 // resources from mailbox. Even though the returned resources aren't purged by the last used, we
 // still end up purging things to get under budget.
-DEF_GRAPHITE_TEST_FOR_ALL_CONTEXTS(GraphitePurgeNotUsedOverBudgetTest, reporter, context) {
+DEF_GRAPHITE_TEST_FOR_ALL_CONTEXTS(GraphitePurgeNotUsedOverBudgetTest, reporter, context,
+                                   CtsEnforcement::kNextRelease) {
     std::unique_ptr<Recorder> recorder = context->makeRecorder();
     ResourceProvider* resourceProvider = recorder->priv().resourceProvider();
     ResourceCache* resourceCache = resourceProvider->resourceCache();
@@ -659,6 +690,75 @@ DEF_GRAPHITE_TEST_FOR_ALL_CONTEXTS(GraphitePurgeNotUsedOverBudgetTest, reporter,
     REPORTER_ASSERT(reporter, resourceCache->getResourceCount() == 1);
     REPORTER_ASSERT(reporter, resourceCache->currentBudgetedBytes() == 3);
     REPORTER_ASSERT(reporter, resourceCache->testingInPurgeableQueue(resource3Ptr));
+}
+
+// Test call purgeResources on the ResourceCache and make sure all unlocked resources are getting
+// purged regardless of when they were last used.
+DEF_GRAPHITE_TEST_FOR_ALL_CONTEXTS(GraphitePurgeResourcesTest, reporter, context,
+                                   CtsEnforcement::kNextRelease) {
+    std::unique_ptr<Recorder> recorder = context->makeRecorder();
+    ResourceProvider* resourceProvider = recorder->priv().resourceProvider();
+    ResourceCache* resourceCache = resourceProvider->resourceCache();
+    const SharedContext* sharedContext = resourceProvider->sharedContext();
+
+    // set resourceCache budget to 10 for testing.
+    resourceCache->setMaxBudget(10);
+
+    // Basic test where we purge 1 resource
+    auto resourcePtr = add_new_purgeable_resource(reporter,
+                                                  sharedContext,
+                                                  resourceCache,
+                                                  /*gpuMemorySize=*/1);
+    if (!resourcePtr) {
+        return;
+    }
+
+    REPORTER_ASSERT(reporter, resourceCache->getResourceCount() == 1);
+
+    // purging should purge the one unlocked resource.
+    resourceCache->purgeResources();
+    REPORTER_ASSERT(reporter, resourceCache->getResourceCount() == 0);
+
+    // Test making 2 purgeable resources
+    Resource* resourcePtr1 = add_new_purgeable_resource(reporter,
+                                                        sharedContext,
+                                                        resourceCache,
+                                                        /*gpuMemorySize=*/1);
+
+    Resource* resourcePtr2 = add_new_purgeable_resource(reporter,
+                                                        sharedContext,
+                                                        resourceCache,
+                                                        /*gpuMemorySize=*/1);
+    if (!resourcePtr1 || !resourcePtr2) {
+        return;
+    }
+
+    REPORTER_ASSERT(reporter, resourceCache->getResourceCount() == 2);
+    REPORTER_ASSERT(reporter, resourceCache->testingInPurgeableQueue(resourcePtr1));
+    REPORTER_ASSERT(reporter, resourceCache->testingInPurgeableQueue(resourcePtr2));
+
+    resourceCache->purgeResources();
+    REPORTER_ASSERT(reporter, resourceCache->getResourceCount() == 0);
+
+    // purgeResources should have no impact on non-purgeable resources
+    auto resource = add_new_resource(reporter,
+                                     sharedContext,
+                                     resourceCache,
+                                     /*gpuMemorySize=*/1);
+    if (!resource) {
+        return;
+    }
+    resourcePtr = resource.get();
+
+    REPORTER_ASSERT(reporter, resourceCache->getResourceCount() == 1);
+
+    resourceCache->purgeResources();
+    REPORTER_ASSERT(reporter, resourceCache->getResourceCount() == 1);
+    REPORTER_ASSERT(reporter, !resourceCache->testingInPurgeableQueue(resourcePtr));
+
+    resource.reset();
+    resourceCache->purgeResources();
+    REPORTER_ASSERT(reporter, resourceCache->getResourceCount() == 0);
 }
 
 }  // namespace skgpu::graphite

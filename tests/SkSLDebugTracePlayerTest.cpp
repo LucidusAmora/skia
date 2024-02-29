@@ -29,7 +29,7 @@
 #include <utility>
 #include <vector>
 
-#if defined(SKSL_ENABLE_TRACING) && defined(SK_ENABLE_SKSL_IN_RASTER_PIPELINE)
+#if defined(SKSL_ENABLE_TRACING)
 
 using LineNumberMap = SkSL::SkSLDebugTracePlayer::LineNumberMap;
 
@@ -37,8 +37,7 @@ static sk_sp<SkSL::DebugTracePriv> make_trace(skiatest::Reporter* r,
                                               std::string src) {
     auto debugTrace = sk_make_sp<SkSL::DebugTracePriv>();
 
-    SkSL::ShaderCaps caps;
-    SkSL::Compiler compiler(&caps);
+    SkSL::Compiler compiler;
     SkSL::ProgramSettings settings;
     settings.fOptimize = false;
 
@@ -61,7 +60,7 @@ static sk_sp<SkSL::DebugTracePriv> make_trace(skiatest::Reporter* r,
             if (rasterProg) {
                 // Append the SkSL program to the raster pipeline, and run it at xy=(0.5, 0.5).
                 static constexpr float kCoordinates[4] = {0.5f, 0.5f, 0.0f, 1.0f};
-                pipeline.append_constant_color(&alloc, kCoordinates);
+                pipeline.appendConstantColor(&alloc, kCoordinates);
                 rasterProg->appendStages(&pipeline,
                                          &alloc,
                                          /*callbacks=*/nullptr,
@@ -952,4 +951,4 @@ half4 main(float2 xy) {     // Line 8
     REPORTER_ASSERT(r, player.getCurrentLine() == 6);
 }
 
-#endif  // defined(SKSL_ENABLE_TRACING) && defined(SK_ENABLE_SKSL_IN_RASTER_PIPELINE)
+#endif  // defined(SKSL_ENABLE_TRACING)

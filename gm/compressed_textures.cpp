@@ -24,6 +24,7 @@
 #include "include/core/SkTextureCompressionType.h"
 #include "include/gpu/GrDirectContext.h"
 #include "include/gpu/GrRecordingContext.h"
+#include "include/gpu/ganesh/SkImageGanesh.h"
 #include "src/core/SkCompressedDataUtils.h"
 #include "src/core/SkMipmap.h"
 #include "src/gpu/ganesh/GrCaps.h"
@@ -154,7 +155,7 @@ static sk_sp<SkImage> make_compressed_image(GrDirectContext* dContext,
                                                            dimensions.width(),
                                                            dimensions.height(),
                                                            compression,
-                                                           GrMipmapped::kYes);
+                                                           skgpu::Mipmapped::kYes);
     } else {
         image = SkImages::RasterFromCompressedTextureData(
                 std::move(tmp), dimensions.width(), dimensions.height(), compression);
@@ -200,7 +201,7 @@ public:
     }
 
 protected:
-    SkString onShortName() override {
+    SkString getName() const override {
         SkString name("compressed_textures");
 
         if (fType == Type::kNonPowerOfTwo) {
@@ -212,11 +213,11 @@ protected:
         return name;
     }
 
-    SkISize onISize() override {
+    SkISize getISize() override {
         return SkISize::Make(2*kCellWidth + 3*kPad, 2*kBaseTexHeight + 3*kPad);
     }
 
-    DrawResult onGpuSetup(SkCanvas* canvas, SkString* errorMsg) override {
+    DrawResult onGpuSetup(SkCanvas* canvas, SkString* errorMsg, GraphiteTestContext*) override {
         auto dContext = GrAsDirectContext(canvas->recordingContext());
         if (dContext && dContext->abandoned()) {
             // This isn't a GpuGM so a null 'context' is okay but an abandoned context

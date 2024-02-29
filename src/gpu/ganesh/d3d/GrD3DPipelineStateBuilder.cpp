@@ -13,6 +13,7 @@
 #include "include/gpu/d3d/GrD3DTypes.h"
 #include "src/core/SkReadBuffer.h"
 #include "src/core/SkTraceEvent.h"
+#include "src/gpu/PipelineUtils.h"
 #include "src/gpu/ganesh/GrAutoLocaleSetter.h"
 #include "src/gpu/ganesh/GrDirectContextPriv.h"
 #include "src/gpu/ganesh/GrPersistentCacheUtils.h"
@@ -65,17 +66,9 @@ const GrCaps* GrD3DPipelineStateBuilder::caps() const {
     return fGpu->caps();
 }
 
-SkSL::Compiler* GrD3DPipelineStateBuilder::shaderCompiler() const {
-    return fGpu->shaderCompiler();
-}
-
 void GrD3DPipelineStateBuilder::finalizeFragmentSecondaryColor(GrShaderVar& outputColor) {
     outputColor.addLayoutQualifier("location = 0, index = 1");
 }
-
-// Print the source code for all shaders generated.
-static const bool gPrintSKSL = false;
-static const bool gPrintHLSL = false;
 
 static gr_cp<ID3DBlob> GrCompileHLSLShader(GrD3DGpu* gpu,
                                            const std::string& hlsl,
@@ -122,7 +115,7 @@ bool GrD3DPipelineStateBuilder::loadHLSLFromCache(SkReadBuffer* reader, gr_cp<ID
     }
 
     auto compile = [&](SkSL::ProgramKind kind, GrShaderType shaderType) {
-        if (intfs[shaderType].fUseFlipRTUniform) {
+        if (intfs[shaderType].fRTFlipUniform != SkSL::Program::Interface::kRTFlip_None) {
             this->addRTFlipUniform(SKSL_RTFLIP_NAME);
         }
         shaders[shaderType] = GrCompileHLSLShader(fGpu, hlsl[shaderType], kind);
@@ -138,35 +131,17 @@ gr_cp<ID3DBlob> GrD3DPipelineStateBuilder::compileD3DProgram(SkSL::ProgramKind k
                                                              const SkSL::ProgramSettings& settings,
                                                              SkSL::Program::Interface* outInterface,
                                                              std::string* outHLSL) {
-#ifdef SK_DEBUG
-    std::string src = SkShaderUtils::PrettyPrint(sksl);
-#else
-    const std::string& src = sksl;
-#endif
-
-    std::unique_ptr<SkSL::Program> program = fGpu->shaderCompiler()->convertProgram(
-            kind, src, settings);
-    if (!program || !fGpu->shaderCompiler()->toHLSL(*program, outHLSL)) {
-        auto errorHandler = fGpu->getContext()->priv().getShaderErrorHandler();
-        errorHandler->compileError(src.c_str(),
-                                   fGpu->shaderCompiler()->errorText().c_str());
+    if (!skgpu::SkSLToHLSL(this->caps()->shaderCaps(),
+                           sksl,
+                           kind,
+                           settings,
+                           outHLSL,
+                           outInterface,
+                           fGpu->getContext()->priv().getShaderErrorHandler())) {
         return gr_cp<ID3DBlob>();
     }
-    *outInterface = program->fInterface;
 
-    if (gPrintSKSL || gPrintHLSL) {
-        SkShaderUtils::PrintShaderBanner(kind);
-        if (gPrintSKSL) {
-            SkDebugf("SKSL:\n");
-            SkShaderUtils::PrintLineByLine(SkShaderUtils::PrettyPrint(sksl));
-        }
-        if (gPrintHLSL) {
-            SkDebugf("HLSL:\n");
-            SkShaderUtils::PrintLineByLine(SkShaderUtils::PrettyPrint(*outHLSL));
-        }
-    }
-
-    if (program->fInterface.fUseFlipRTUniform) {
+    if (outInterface->fRTFlipUniform != SkSL::Program::Interface::kRTFlip_None) {
         this->addRTFlipUniform(SKSL_RTFLIP_NAME);
     }
 
@@ -630,7 +605,7 @@ std::unique_ptr<GrD3DPipelineState> GrD3DPipelineStateBuilder::finalize() {
     }
 
     sk_sp<GrD3DRootSignature> rootSig =
-            fGpu->resourceProvider().findOrCreateRootSignature(fUniformHandler.fTextures.count());
+            fGpu->resourceProvider().findOrCreateRootSignature(fUniformHandler.fSamplers.count());
     if (!rootSig) {
         return nullptr;
     }

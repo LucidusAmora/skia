@@ -17,6 +17,8 @@
 #include "include/private/gpu/ganesh/GrTypesPriv.h"
 #include "src/gpu/ganesh/GrSurface.h"
 
+class GrCaps;
+
 class GrTexture : virtual public GrSurface {
 public:
     GrTexture* asTexture() override { return this; }
@@ -48,8 +50,8 @@ public:
 
     void markMipmapsDirty();
     void markMipmapsClean();
-    GrMipmapped mipmapped() const {
-        return GrMipmapped(fMipmapStatus != GrMipmapStatus::kNotAllocated);
+    skgpu::Mipmapped mipmapped() const {
+        return skgpu::Mipmapped(fMipmapStatus != GrMipmapStatus::kNotAllocated);
     }
     bool mipmapsAreDirty() const { return fMipmapStatus != GrMipmapStatus::kValid; }
     GrMipmapStatus mipmapStatus() const { return fMipmapStatus; }
@@ -60,7 +62,7 @@ public:
                                   SkISize dimensions,
                                   GrRenderable,
                                   int sampleCnt,
-                                  GrMipmapped,
+                                  skgpu::Mipmapped,
                                   GrProtected,
                                   skgpu::ScratchKey* key);
 

@@ -13,6 +13,7 @@
 #include "src/gpu/graphite/ComputePipelineDesc.h"
 #include "src/gpu/graphite/ComputeTypes.h"
 #include "src/gpu/graphite/ResourceTypes.h"
+#include "src/gpu/graphite/Sampler.h"
 #include "src/gpu/graphite/TextureProxy.h"
 #include "src/gpu/graphite/compute/ComputeStep.h"
 
@@ -26,9 +27,17 @@ class Recorder;
 class ResourceProvider;
 
 using BindingIndex = uint32_t;
-using TextureIndex = uint32_t;
-using DispatchResource = std::variant<BindBufferInfo, TextureIndex>;
-using DispatchResourceOptional = std::variant<std::monostate, BindBufferInfo, TextureIndex>;
+struct TextureIndex { uint32_t fValue; };
+struct SamplerIndex { uint32_t fValue; };
+
+struct BufferView {
+    BindBufferInfo fInfo;
+    size_t fSize;
+};
+
+using DispatchResource = std::variant<BufferView, TextureIndex, SamplerIndex>;
+using DispatchResourceOptional =
+        std::variant<std::monostate, BufferView, TextureIndex, SamplerIndex>;
 
 struct ResourceBinding {
     BindingIndex fIndex;
@@ -54,7 +63,10 @@ public:
     class Builder;
 
     struct Dispatch {
-        ComputePassDesc fParams;
+        WorkgroupSize fLocalSize;
+        std::variant<WorkgroupSize, BufferView> fGlobalSizeOrIndirect;
+
+        std::optional<WorkgroupSize> fGlobalDispatchSize;
         skia_private::TArray<ResourceBinding> fBindings;
         skia_private::TArray<ComputeStep::WorkgroupBufferDesc> fWorkgroupBuffers;
         int fPipelineIndex = 0;
@@ -65,7 +77,8 @@ public:
     const skia_private::TArray<Dispatch>& dispatches() const { return fDispatchList; }
 
     const ComputePipeline* getPipeline(size_t index) const { return fPipelines[index].get(); }
-    const Texture* getTexture(TextureIndex index) const;
+    const Texture* getTexture(size_t index) const;
+    const Sampler* getSampler(size_t index) const;
 
     bool prepareResources(ResourceProvider*);
     void addResourceRefs(CommandBuffer*) const;
@@ -84,32 +97,23 @@ private:
     // Pipelines are referenced by index by each Dispatch in `fDispatchList`. They are stored as a
     // pipeline description until instantiated in `prepareResources()`.
     skia_private::TArray<ComputePipelineDesc> fPipelineDescs;
+    skia_private::TArray<SamplerDesc> fSamplerDescs;
 
     // Resources instantiated by `prepareResources()`
     skia_private::TArray<sk_sp<ComputePipeline>> fPipelines;
     skia_private::TArray<sk_sp<TextureProxy>> fTextures;
+    skia_private::TArray<sk_sp<Sampler>> fSamplers;
 };
 
 class DispatchGroup::Builder final {
 public:
     // Contains the resource handles assigned to the outputs of the most recently inserted
     // ComputeStep.
-    // TODO(b/259564970): Support TextureProxy slot entries.
     struct OutputTable {
-        // Draw buffers that can be forwarded to a DrawPass
-        BindBufferInfo fVertexBuffer;
-        BindBufferInfo fIndexBuffer;
-        BindBufferInfo fInstanceBuffer;
-        BindBufferInfo fIndirectDrawBuffer;
-
         // Contains the std::monostate variant if the slot is uninitialized
         DispatchResourceOptional fSharedSlots[kMaxComputeDataFlowSlots];
 
         OutputTable() = default;
-
-        bool hasDrawBuffers() const {
-            return fVertexBuffer || fIndexBuffer || fInstanceBuffer || fIndirectDrawBuffer;
-        }
 
         void reset() { *this = {}; }
     };
@@ -118,19 +122,23 @@ public:
 
     const OutputTable& outputTable() const { return fOutputTable; }
 
-    // Add a new compute step to the dispatch group and assign its resources. Any output resources
-    // currently present in the OutputTable will be forwarded to the corresponding input slots of
-    // the new ComputeStep. If the ComputeStep specifies a geometry input resource, it will be
-    // prompted to populate it using the draw parameters. All other resources will be assigned
-    // dynamically.
+    // Add a new compute step to the dispatch group and initialize its required resources if
+    // necessary.
     //
     // If the global dispatch size (i.e. workgroup count) is known ahead of time it can be
     // optionally provided here while appending a step. If provided, the ComputeStep will not
     // receive a call to `calculateGlobalDispatchSize`.
-    bool appendStep(const ComputeStep*,
-                    const DrawParams&,
-                    int ssboIndex,
-                    std::optional<WorkgroupSize> globalSize = std::nullopt);
+    bool appendStep(const ComputeStep*, std::optional<WorkgroupSize> globalSize = std::nullopt);
+
+    // Add a new compute step to the dispatch group with an indirectly specified global dispatch
+    // size. Initialize the required resources if necessary.
+    //
+    // The global dispatch size is determined by the GPU by reading the entries in `indirectBuffer`.
+    // The contents of this buffer must conform to the layout of the `IndirectDispatchArgs`
+    // structure declared in ComputeTypes.h.
+    //
+    // The ComputeStep will not receive a call to `calculateGlobalDispatchSize`.
+    bool appendStepIndirect(const ComputeStep*, BufferView indirectBuffer);
 
     // Directly assign a buffer range to a shared slot. ComputeSteps that are appended after this
     // call will use this resouce if they reference the given `slot` index. Builder will not
@@ -140,7 +148,7 @@ public:
     // If the slot is already assigned a buffer, it will be overwritten. Calling this method does
     // not have any effect on previously appended ComputeSteps that were already bound that
     // resource.
-    void assignSharedBuffer(BindBufferInfo buffer, unsigned int slot);
+    void assignSharedBuffer(BufferView buffer, unsigned int slot);
 
     // Directly assign a texture to a shared slot. ComputeSteps that are appended after this call
     // will use this resource if they reference the given `slot` index. Builder will not allocate
@@ -163,19 +171,13 @@ public:
     sk_sp<TextureProxy> getSharedTextureResource(unsigned int slot) const;
 
 private:
-    // Allocate a buffer for one of the vertex|index|instance|indirect draw buffer slots.
-    BindBufferInfo allocateDrawBuffer(const ComputeStep* step,
-                                      const ComputeStep::ResourceDesc& resource,
-                                      int resourceIdx,
-                                      const DrawParams& params);
+    bool appendStepInternal(const ComputeStep*, const std::variant<WorkgroupSize, BufferView>&);
 
     // Allocate a resource that can be assigned to the shared or private data flow slots. Returns a
     // std::monostate if allocation fails.
     DispatchResourceOptional allocateResource(const ComputeStep* step,
                                               const ComputeStep::ResourceDesc& resource,
-                                              int ssboIdx,
-                                              int resourceIdx,
-                                              const DrawParams& params);
+                                              int resourceIdx);
 
     // The object under construction.
     std::unique_ptr<DispatchGroup> fObj;

@@ -45,6 +45,13 @@ CORE_COPTS = [
         # (e.g. "undefined reference to `SkString::data()'").
         "-fvisibility=hidden",
     ],
+}) + select({
+    "@platforms//os:windows": [],
+    "//conditions:default": [
+        # In Clang 14, this default was changed. We turn this off to (hopefully) make our
+        # GMs more consistent and avoid some floating-point related test failures on M1 macs.
+        "-ffp-contract=off",
+    ],
 })
 
 OPT_LEVEL = select({
@@ -84,14 +91,17 @@ WARNINGS = [
     "-Wno-old-style-cast",
     "-Wno-padded",
     "-Wno-psabi",  # noisy
+    "-Wno-return-std-move-in-c++11",
     "-Wno-shadow-field-in-constructor",
     "-Wno-shadow-uncaptured-local",
     "-Wno-undefined-func-template",
     "-Wno-unused-parameter",  # It is common to have unused parameters in src/
     "-Wno-zero-as-null-pointer-constant",  # VK_NULL_HANDLE is defined as 0
+    "-Wno-unsafe-buffer-usage",
     #### Warnings we would like to fix ####
     "-Wno-abstract-vbase-init",
     "-Wno-cast-align",
+    "-Wno-cast-function-type-strict",
     "-Wno-cast-qual",
     "-Wno-class-varargs",
     "-Wno-conversion",  # -Wsign-conversion re-enabled for header sources
@@ -149,7 +159,6 @@ WARNINGS = [
     "-Wdeprecated-this-capture",
     "-Wdeprecated-volatile",
     "-Wdeprecated-writable-strings",
-    "-Wc++98-compat-extra-semi",
     # A catch-all for when the version of clang we are using does not have the prior options
     "-Wno-unknown-warning-option",
 ] + select({

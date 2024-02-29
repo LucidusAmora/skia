@@ -28,7 +28,7 @@ GrMtlTexture::GrMtlTexture(GrMtlGpu* gpu,
         , fTexture(std::move(texture)) {
     SkDEBUGCODE(id<MTLTexture> mtlTexture = fTexture->mtlTexture();)
     SkASSERT((GrMipmapStatus::kNotAllocated == mipmapStatus) == (1 == mtlTexture.mipmapLevelCount));
-    if (@available(macOS 10.11, iOS 9.0, *)) {
+    if (@available(macOS 10.11, iOS 9.0, tvOS 9.0, *)) {
         SkASSERT(SkToBool(mtlTexture.usage & MTLTextureUsageShaderRead));
     }
     SkASSERT(!mtlTexture.framebufferOnly);
@@ -51,7 +51,7 @@ GrMtlTexture::GrMtlTexture(GrMtlGpu* gpu,
         , fTexture(std::move(texture)) {
     SkDEBUGCODE(id<MTLTexture> mtlTexture = fTexture->mtlTexture();)
     SkASSERT((GrMipmapStatus::kNotAllocated == mipmapStatus) == (1 == mtlTexture.mipmapLevelCount));
-    if (@available(macOS 10.11, iOS 9.0, *)) {
+    if (@available(macOS 10.11, iOS 9.0, tvOS 9.0, *)) {
         SkASSERT(SkToBool(mtlTexture.usage & MTLTextureUsageShaderRead));
     }
     SkASSERT(!mtlTexture.framebufferOnly);
@@ -71,7 +71,7 @@ GrMtlTexture::GrMtlTexture(GrMtlGpu* gpu,
         , fTexture(std::move(texture)) {
     SkDEBUGCODE(id<MTLTexture> mtlTexture = fTexture->mtlTexture();)
     SkASSERT((GrMipmapStatus::kNotAllocated == mipmapStatus) == (1 == mtlTexture.mipmapLevelCount));
-    if (@available(macOS 10.11, iOS 9.0, *)) {
+    if (@available(macOS 10.11, iOS 9.0, tvOS 9.0, *)) {
         SkASSERT(SkToBool(mtlTexture.usage & MTLTextureUsageShaderRead));
     }
     SkASSERT(!mtlTexture.framebufferOnly);
@@ -100,7 +100,7 @@ sk_sp<GrMtlTexture> GrMtlTexture::MakeWrappedTexture(GrMtlGpu* gpu,
                                                      GrWrapCacheable cacheable,
                                                      GrIOType ioType) {
     SkASSERT(nil != texture);
-    if (@available(macOS 10.11, iOS 9.0, *)) {
+    if (@available(macOS 10.11, iOS 9.0, tvOS 9.0, *)) {
         SkASSERT(SkToBool(texture.usage & MTLTextureUsageShaderRead));
     }
     sk_sp<GrMtlAttachment> attachment =
@@ -128,8 +128,9 @@ GrMtlGpu* GrMtlTexture::getMtlGpu() const {
 }
 
 GrBackendTexture GrMtlTexture::getBackendTexture() const {
-    GrMipmapped mipmapped = fTexture->mtlTexture().mipmapLevelCount > 1 ? GrMipmapped::kYes
-                                                                        : GrMipmapped::kNo;
+    skgpu::Mipmapped mipmapped = fTexture->mtlTexture().mipmapLevelCount > 1
+                                         ? skgpu::Mipmapped::kYes
+                                         : skgpu::Mipmapped::kNo;
     GrMtlTextureInfo info;
     info.fTexture.reset(GrRetainPtrFromId(fTexture->mtlTexture()));
     return GrBackendTexture(this->width(), this->height(), mipmapped, info);

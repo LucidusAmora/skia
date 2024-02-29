@@ -10,6 +10,7 @@
 
 #include "include/private/base/SkTArray.h"
 #include "src/base/SkSpinlock.h"
+#include "src/core/SkChecksum.h"
 #include "src/core/SkLRUCache.h"
 #include "src/core/SkTDynamicHash.h"
 #include "src/gpu/ganesh/GrProgramDesc.h"
@@ -47,7 +48,7 @@ public:
     // Destroy any cached resources. To be called before releasing the MtlDevice.
     void destroyResources();
 
-#if GR_TEST_UTILS
+#if defined(GR_TEST_UTILS)
     void resetShaderCacheForTesting() const { fPipelineStateCache->release(); }
 #endif
 
@@ -74,7 +75,7 @@ private:
 
         struct DescHash {
             uint32_t operator()(const GrProgramDesc& desc) const {
-                return SkOpts::hash_fn(desc.asKey(), desc.keyLength(), 0);
+                return SkChecksum::Hash32(desc.asKey(), desc.keyLength());
             }
         };
 

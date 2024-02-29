@@ -11,6 +11,9 @@ It follows the example of:
  - linux_amd64_toolchain_config.bzl
 """
 
+# https://github.com/bazelbuild/bazel/blob/master/tools/build_defs/cc/action_names.bzl
+load("@bazel_tools//tools/build_defs/cc:action_names.bzl", "ACTION_NAMES")
+
 # https://github.com/bazelbuild/bazel/blob/master/tools/cpp/cc_toolchain_config_lib.bzl
 load(
     "@bazel_tools//tools/cpp:cc_toolchain_config_lib.bzl",
@@ -21,9 +24,6 @@ load(
     "tool",
     "variable_with_value",
 )
-
-# https://github.com/bazelbuild/bazel/blob/master/tools/build_defs/cc/action_names.bzl
-load("@bazel_tools//tools/build_defs/cc:action_names.bzl", "ACTION_NAMES")
 load(":clang_layering_check.bzl", "make_layering_check_features")
 
 # The location of the created clang toolchain.
@@ -60,9 +60,11 @@ def _mac_toolchain_info(ctx):
             # https://bazel.build/rules/lib/cc_common#create_cc_toolchain_config_info.cxx_builtin_include_directories
             "%sysroot%/symlinks/xcode/MacSDK/Frameworks/",
         ],
+        # If `ctx.attr.cpu` is blank (which is declared as optional below), this config will target
+        # the host CPU. Specifying a target_cpu allows this config to be used for cross compilation.
+        target_cpu = ctx.attr.cpu,
         # These are required, but do nothing
         compiler = "",
-        target_cpu = "",
         target_libc = "",
         target_system_name = "",
         toolchain_identifier = "",
@@ -81,6 +83,13 @@ def _import_platform_constraints():
     for constraint in _platform_constraints_to_import:
         private_attr = _platform_constraints_to_import[constraint]
         rule_attributes[private_attr] = attr.label(default = constraint)
+
+    # Define an optional attribute to allow the target architecture to be explicitly specified (e.g.
+    # when selecting a cross-compilation toolchain).
+    rule_attributes["cpu"] = attr.string(
+        mandatory = False,
+        values = ["arm64", "x64"],
+    )
     return rule_attributes
 
 def _has_platform_constraint(ctx, official_constraint_name):

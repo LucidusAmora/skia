@@ -28,6 +28,7 @@
 #include "src/core/SkCanvasPriv.h"
 #include "src/core/SkRectPriv.h"
 #include "src/core/SkStringUtils.h"
+#include "src/gpu/ganesh/GrCanvas.h"
 #include "src/gpu/ganesh/GrRecordingContextPriv.h"
 #include "src/gpu/ganesh/GrRenderTargetProxy.h"
 #include "src/gpu/ganesh/GrSurfaceProxy.h"
@@ -35,6 +36,7 @@
 #include "tools/debugger/DebugLayerManager.h"
 #include "tools/debugger/DrawCommand.h"
 
+#include <cstring>
 #include <string>
 #include <utility>
 
@@ -244,7 +246,7 @@ void DebugCanvas::drawTo(SkCanvas* originalCanvas, int index, int m) {
 
         // get the render target of the top device (from the original canvas) so we can ignore ops
         // drawn offscreen
-        GrRenderTargetProxy* rtp = SkCanvasPriv::TopDeviceTargetProxy(originalCanvas);
+        GrRenderTargetProxy* rtp = skgpu::ganesh::TopDeviceTargetProxy(originalCanvas);
         GrSurfaceProxy::UniqueID proxyID = rtp->uniqueID();
 
         // get the bounding boxes to draw
@@ -352,7 +354,7 @@ void DebugCanvas::toJSON(SkJSONWriter&   writer,
         this->getDrawCommandAt(i)->toJSON(writer, urlDataManager);
 
 #if defined(SK_GANESH)
-        if (at) {
+        if (at && at->isEnabled()) {
             writer.appendName(SKDEBUGCANVAS_ATTRIBUTE_AUDITTRAIL);
             at->toJson(writer, i);
         }

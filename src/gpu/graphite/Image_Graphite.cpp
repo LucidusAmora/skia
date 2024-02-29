@@ -16,6 +16,7 @@
 #include "include/gpu/graphite/Recorder.h"
 #include "include/gpu/graphite/Surface.h"
 #include "src/gpu/RefCntedCallback.h"
+#include "src/gpu/SkBackingFit.h"
 #include "src/gpu/graphite/Caps.h"
 #include "src/gpu/graphite/Log.h"
 #include "src/gpu/graphite/RecorderPriv.h"
@@ -31,13 +32,19 @@ Image::Image(uint32_t uniqueID,
     , fTextureProxyView(std::move(view)) {
 }
 
-Image::Image(TextureProxyView view,
-             const SkColorInfo& info)
-    : Image_Base(SkImageInfo::Make(view.proxy()->dimensions(), info), kNeedNewImageUniqueID)
-    , fTextureProxyView(std::move(view)) {
-}
-
 Image::~Image() {}
+
+size_t Image::textureSize() const {
+    if (!fTextureProxyView.proxy()) {
+        return 0;
+    }
+
+    if (!fTextureProxyView.proxy()->texture()) {
+        return fTextureProxyView.proxy()->uninstantiatedGpuMemorySize();
+    }
+
+    return fTextureProxyView.proxy()->texture()->gpuMemorySize();
+}
 
 sk_sp<SkImage> Image::onMakeSubset(Recorder* recorder,
                                    const SkIRect& subset,
@@ -66,14 +73,14 @@ sk_sp<SkImage> Image::makeTextureImage(Recorder* recorder, RequiredProperties re
 sk_sp<SkImage> Image::copyImage(const SkIRect& subset,
                                 Recorder* recorder,
                                 RequiredProperties requiredProps) const {
-    TextureProxyView srcView = this->textureProxyView();
+    const TextureProxyView& srcView = this->textureProxyView();
     if (!srcView) {
         return nullptr;
     }
 
     auto mm = requiredProps.fMipmapped ? skgpu::Mipmapped::kYes : skgpu::Mipmapped::kNo;
-    TextureProxyView copiedView =
-            TextureProxyView::Copy(recorder, this->imageInfo().colorInfo(), srcView, subset, mm);
+    TextureProxyView copiedView = TextureProxyView::Copy(
+            recorder, this->imageInfo().colorInfo(), srcView, subset, mm, SkBackingFit::kExact);
     if (!copiedView) {
         return nullptr;
     }
@@ -105,7 +112,7 @@ sk_sp<SkImage> Image::makeColorTypeAndColorSpace(Recorder* recorder,
     }
 
     s->getCanvas()->drawImage(this, 0, 0);
-    return s->asImage();
+    return SkSurfaces::AsImage(s);
 }
 
 } // namespace skgpu::graphite
@@ -115,6 +122,7 @@ using SkImages::GraphitePromiseImageFulfillProc;
 using SkImages::GraphitePromiseTextureReleaseProc;
 
 sk_sp<TextureProxy> Image::MakePromiseImageLazyProxy(
+        const Caps* caps,
         SkISize dimensions,
         TextureInfo textureInfo,
         Volatile isVolatile,
@@ -181,20 +189,10 @@ sk_sp<TextureProxy> Image::MakePromiseImageLazyProxy(
 
     } callback(fulfillProc, std::move(releaseHelper), textureReleaseProc);
 
-    return TextureProxy::MakeLazy(dimensions,
+    return TextureProxy::MakeLazy(caps,
+                                  dimensions,
                                   textureInfo,
                                   skgpu::Budgeted::kNo,  // This is destined for a user's SkImage
                                   isVolatile,
                                   std::move(callback));
 }
-
-#if !defined(SK_DISABLE_LEGACY_GRAPHITE_IMAGE_METHODS)
-#include "include/gpu/graphite/Image.h"
-
-sk_sp<SkImage> SkImage::makeTextureImage(skgpu::graphite::Recorder* recorder,
-                                         RequiredImageProperties props) const {
-    auto mm = props.fMipmapped == skgpu::Mipmapped::kYes;
-    return SkImages::TextureFromImage(recorder, this, {mm});
-}
-#endif
-

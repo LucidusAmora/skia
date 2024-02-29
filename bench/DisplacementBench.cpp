@@ -11,6 +11,7 @@
 #include "include/core/SkFont.h"
 #include "include/core/SkSurface.h"
 #include "include/effects/SkImageFilters.h"
+#include "tools/fonts/FontToolUtils.h"
 
 #define FILTER_WIDTH_SMALL  32
 #define FILTER_HEIGHT_SMALL 32
@@ -37,7 +38,7 @@ protected:
         SkPaint paint;
         paint.setColor(0xFF884422);
 
-        SkFont font;
+        SkFont font = ToolUtils::DefaultFont();
         font.setSize(SkIntToScalar(96));
         surf->getCanvas()->drawSimpleText("g", 1, SkTextEncoding::kUTF8, 15, 55, font, paint);
         fImage = surf->makeImageSnapshot();
@@ -96,7 +97,7 @@ protected:
 
     void onDraw(int loops, SkCanvas* canvas) override {
         SkPaint paint;
-        sk_sp<SkImageFilter> displ(SkImageFilters::Image(fCheckerboard));
+        sk_sp<SkImageFilter> displ(SkImageFilters::Image(fCheckerboard, SkFilterMode::kLinear));
         // No displacement effect
         paint.setImageFilter(SkImageFilters::DisplacementMap(SkColorChannel::kR, SkColorChannel::kG,
                                                              0.0f, std::move(displ), nullptr));
@@ -121,7 +122,7 @@ protected:
 
     void onDraw(int loops, SkCanvas* canvas) override {
         SkPaint paint;
-        sk_sp<SkImageFilter> displ(SkImageFilters::Image(fCheckerboard));
+        sk_sp<SkImageFilter> displ(SkImageFilters::Image(fCheckerboard, SkFilterMode::kLinear));
         // Displacement, with 1 alpha component (which isn't pre-multiplied)
         paint.setImageFilter(SkImageFilters::DisplacementMap(SkColorChannel::kB, SkColorChannel::kA,
                                                              16.0f, std::move(displ), nullptr));
@@ -145,7 +146,7 @@ protected:
 
     void onDraw(int loops, SkCanvas* canvas) override {
         SkPaint paint;
-        sk_sp<SkImageFilter> displ(SkImageFilters::Image(fCheckerboard));
+        sk_sp<SkImageFilter> displ(SkImageFilters::Image(fCheckerboard, SkFilterMode::kLinear));
         // Displacement, with 2 non-alpha components
         paint.setImageFilter(SkImageFilters::DisplacementMap(SkColorChannel::kR, SkColorChannel::kB,
                                                              32.0f, std::move(displ), nullptr));

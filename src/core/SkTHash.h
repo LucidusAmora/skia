@@ -9,11 +9,12 @@
 #define SkTHash_DEFINED
 
 #include "include/core/SkTypes.h"
-#include "include/private/base/SkTemplates.h"
 #include "src/core/SkChecksum.h"
 
 #include <initializer_list>
+#include <memory>
 #include <new>
+#include <type_traits>
 #include <utility>
 
 namespace skia_private {
@@ -40,7 +41,7 @@ public:
         if (this != &that) {
             fCount     = that.fCount;
             fCapacity  = that.fCapacity;
-            fSlots.reset(that.fCapacity);
+            fSlots.reset(new Slot[that.fCapacity]);
             for (int i = 0; i < fCapacity; i++) {
                 fSlots[i] = that.fSlots[i];
             }
@@ -118,24 +119,32 @@ public:
         return nullptr;
     }
 
-    // Remove the value with this key from the hash table.
-    void remove(const K& key) {
-        SkASSERT(this->find(key));
-
+    // If a value with this key exists in the hash table, removes it and returns true.
+    // Otherwise, returns false.
+    bool removeIfExists(const K& key) {
         uint32_t hash = Hash(key);
         int index = hash & (fCapacity-1);
         for (int n = 0; n < fCapacity; n++) {
             Slot& s = fSlots[index];
-            SkASSERT(s.has_value());
+            if (s.empty()) {
+                return false;
+            }
             if (hash == s.fHash && key == Traits::GetKey(*s)) {
                this->removeSlot(index);
                if (4 * fCount <= fCapacity && fCapacity > 4) {
                    this->resize(fCapacity / 2);
                }
-               return;
+               return true;
             }
             index = this->next(index);
         }
+        SkASSERT(fCapacity == fCount);
+        return false;
+    }
+
+    // Removes the value with this key from the hash table. Asserts if it is missing.
+    void remove(const K& key) {
+        SkAssertResult(this->removeIfExists(key));
     }
 
     // Hash tables will automatically resize themselves when set() and remove() are called, but
@@ -147,8 +156,8 @@ public:
 
         fCount = 0;
         fCapacity = capacity;
-        AutoTArray<Slot> oldSlots = std::move(fSlots);
-        fSlots = AutoTArray<Slot>(capacity);
+        std::unique_ptr<Slot[]> oldSlots = std::move(fSlots);
+        fSlots.reset(new Slot[capacity]);
 
         for (int i = 0; i < oldCapacity; i++) {
             Slot& s = oldSlots[i];
@@ -413,7 +422,7 @@ private:
 
     int fCount    = 0,
         fCapacity = 0;
-    AutoTArray<Slot> fSlots;
+    std::unique_ptr<Slot[]> fSlots;
 };
 
 // Maps K->V.  A more user-friendly wrapper around THashTable, suitable for most use cases.
@@ -481,22 +490,35 @@ public:
         return *this->set(key, V{});
     }
 
-    // Remove the key/value entry in the table with this key.
+    // Removes the key/value entry in the table with this key. Asserts if the key is not present.
     void remove(const K& key) {
-        SkASSERT(this->find(key));
         fTable.remove(key);
     }
 
+    // If the key exists in the table, removes it and returns true. Otherwise, returns false.
+    bool removeIfExists(const K& key) {
+        return fTable.removeIfExists(key);
+    }
+
     // Call fn on every key/value pair in the table.  You may mutate the value but not the key.
-    template <typename Fn>  // f(K, V*) or f(const K&, V*)
+    template <typename Fn,  // f(K, V*) or f(const K&, V*)
+              std::enable_if_t<std::is_invocable_v<Fn, K, V*>>* = nullptr>
     void foreach(Fn&& fn) {
-        fTable.foreach([&fn](Pair* p){ fn(p->first, &p->second); });
+        fTable.foreach([&fn](Pair* p) { fn(p->first, &p->second); });
     }
 
     // Call fn on every key/value pair in the table.  You may not mutate anything.
-    template <typename Fn>  // f(K, V), f(const K&, V), f(K, const V&) or f(const K&, const V&).
+    template <typename Fn,  // f(K, V), f(const K&, V), f(K, const V&) or f(const K&, const V&).
+              std::enable_if_t<std::is_invocable_v<Fn, K, V>>* = nullptr>
     void foreach(Fn&& fn) const {
-        fTable.foreach([&fn](const Pair& p){ fn(p.first, p.second); });
+        fTable.foreach([&fn](const Pair& p) { fn(p.first, p.second); });
+    }
+
+    // Call fn on every key/value pair in the table.  You may not mutate anything.
+    template <typename Fn,  // f(Pair), or f(const Pair&)
+              std::enable_if_t<std::is_invocable_v<Fn, Pair>>* = nullptr>
+    void foreach(Fn&& fn) const {
+        fTable.foreach([&fn](const Pair& p) { fn(p); });
     }
 
     // Dereferencing an iterator gives back a key-value pair, suitable for structured binding.

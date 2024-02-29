@@ -49,7 +49,8 @@ bool coeff_equal(SkBlendModeCoeff skCoeff, skgpu::BlendCoeff gpuCoeff) {
 } // anonymous namespace
 
 // These are intended to be unit tests of the PaintParamsKeyBuilder and PaintParamsKey.
-DEF_GRAPHITE_TEST_FOR_ALL_CONTEXTS(KeyWithInvalidCodeSnippetIDTest, reporter, context) {
+DEF_GRAPHITE_TEST_FOR_ALL_CONTEXTS(KeyWithInvalidCodeSnippetIDTest, reporter, context,
+                                   CtsEnforcement::kNextRelease) {
     SkArenaAlloc arena{256};
     ShaderCodeDictionary* dict = context->priv().shaderCodeDictionary();
 
@@ -70,19 +71,20 @@ DEF_GRAPHITE_TEST_FOR_ALL_CONTEXTS(KeyWithInvalidCodeSnippetIDTest, reporter, co
     // NOTE: This is intentionally abusing memory to create a corrupt scenario and is dependent on
     // the structure of PaintParamsKey (just SkSpan<const int32_t>).
     int32_t invalidKeyData[3] = {(int32_t) BuiltInCodeSnippetID::kSolidColorShader,
-                                 kBuiltInCodeSnippetIDCount + 12345,
+                                 SkKnownRuntimeEffects::kSkiaBuiltInReservedCnt - 1,
                                  (int32_t) BuiltInCodeSnippetID::kFixedFunctionSrcBlendMode};
     SkSpan<const int32_t> invalidKeySpan{invalidKeyData, std::size(invalidKeyData)*sizeof(int32_t)};
     const PaintParamsKey* fakeKey = reinterpret_cast<const PaintParamsKey*>(&invalidKeySpan);
     REPORTER_ASSERT(reporter, fakeKey->getRootNodes(dict, &arena).empty());
 }
 
-DEF_GRAPHITE_TEST_FOR_ALL_CONTEXTS(KeyEqualityChecksSnippetID, reporter, context) {
+DEF_GRAPHITE_TEST_FOR_ALL_CONTEXTS(KeyEqualityChecksSnippetID, reporter, context,
+                                   CtsEnforcement::kNextRelease) {
     SkArenaAlloc arena{256};
     ShaderCodeDictionary* dict = context->priv().shaderCodeDictionary();
 
-    int userSnippetID1 = dict->addUserDefinedSnippet("key1");
-    int userSnippetID2 = dict->addUserDefinedSnippet("key2");
+    int userSnippetID1 = dict->addRuntimeEffectSnippet("key1");
+    int userSnippetID2 = dict->addRuntimeEffectSnippet("key2");
 
     PaintParamsKey keyA = create_key(dict, userSnippetID1, &arena);
     PaintParamsKey keyB = create_key(dict, userSnippetID1, &arena);
@@ -95,7 +97,8 @@ DEF_GRAPHITE_TEST_FOR_ALL_CONTEXTS(KeyEqualityChecksSnippetID, reporter, context
     REPORTER_ASSERT(reporter, !(keyA != keyB));
 }
 
-DEF_GRAPHITE_TEST_FOR_ALL_CONTEXTS(ShaderInfoDetectsFixedFunctionBlend, reporter, context) {
+DEF_GRAPHITE_TEST_FOR_ALL_CONTEXTS(ShaderInfoDetectsFixedFunctionBlend, reporter, context,
+                                   CtsEnforcement::kNextRelease) {
     ShaderCodeDictionary* dict = context->priv().shaderCodeDictionary();
 
     for (int bm = 0; bm <= (int) SkBlendMode::kLastCoeffMode; ++bm) {

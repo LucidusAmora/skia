@@ -14,9 +14,6 @@
 #include "src/gpu/graphite/ContextPriv.h"
 #include "src/gpu/graphite/dawn/DawnQueueManager.h"
 #include "src/gpu/graphite/dawn/DawnSharedContext.h"
-#include "src/sksl/SkSLCompiler.h"
-#include "src/sksl/SkSLProgramSettings.h"
-#include "src/utils/SkShaderUtils.h"
 
 namespace skgpu::graphite {
 
@@ -91,60 +88,74 @@ wgpu::TextureFormat DawnDepthStencilFlagsToFormat(SkEnumBitMask<DepthStencilFlag
     return wgpu::TextureFormat::Undefined;
 }
 
-// Print the source code for all shaders generated.
-#ifdef SK_PRINT_SKSL_SHADERS
-static constexpr bool gPrintSKSL  = true;
-#else
-static constexpr bool gPrintSKSL  = false;
-#endif
-bool SkSLToSPIRV(SkSL::Compiler* compiler,
-                 const std::string& sksl,
-                 SkSL::ProgramKind programKind,
-                 const SkSL::ProgramSettings& settings,
-                 std::string* spirv,
-                 SkSL::Program::Interface* outInterface,
-                 ShaderErrorHandler* errorHandler) {
-#ifdef SK_DEBUG
-    std::string src = SkShaderUtils::PrettyPrint(sksl);
-#else
-    const std::string& src = sksl;
-#endif
-    std::unique_ptr<SkSL::Program> program = compiler->convertProgram(programKind,
-                                                                      src,
-                                                                      settings);
-    if (!program || !compiler->toSPIRV(*program, spirv)) {
-        errorHandler->compileError(src.c_str(), compiler->errorText().c_str());
-        return false;
-    }
-
-    if (gPrintSKSL) {
-        SkShaderUtils::PrintShaderBanner(programKind);
-        SkDebugf("SKSL:\n");
-        SkShaderUtils::PrintLineByLine(SkShaderUtils::PrettyPrint(sksl));
-    }
-
-    *outInterface = program->fInterface;
+static bool check_shader_module(wgpu::ShaderModule* module,
+                                const char* shaderText,
+                                ShaderErrorHandler* errorHandler) {
+    // Prior to emsdk 3.1.51 wgpu::ShaderModule::GetCompilationInfo is unimplemented.
+#if defined(__EMSCRIPTEN__)                                      &&  \
+        ((__EMSCRIPTEN_major__ <  3                               || \
+         (__EMSCRIPTEN_major__ == 3 && __EMSCRIPTEN_minor__ <  1) || \
+         (__EMSCRIPTEN_major__ == 3 && __EMSCRIPTEN_minor__ == 1 && __EMSCRIPTEN_tiny__ < 51)))
     return true;
+#endif
+    struct Handler {
+        static void Fn(WGPUCompilationInfoRequestStatus status,
+                       const WGPUCompilationInfo* info,
+                       void* userdata) {
+            Handler* self = reinterpret_cast<Handler*>(userdata);
+            SkASSERT(status == WGPUCompilationInfoRequestStatus_Success);
+
+            // Walk the message list and check for hard errors.
+            self->fSuccess = true;
+            for (size_t index = 0; index < info->messageCount; ++index) {
+                const WGPUCompilationMessage& entry = info->messages[index];
+                if (entry.type == WGPUCompilationMessageType_Error) {
+                    self->fSuccess = false;
+                    break;
+                }
+            }
+
+            // If we found a hard error, report the compilation messages to the error handler.
+            if (!self->fSuccess) {
+                std::string errors;
+                for (size_t index = 0; index < info->messageCount; ++index) {
+                    const WGPUCompilationMessage& entry = info->messages[index];
+                    errors += "line " +
+                              std::to_string(entry.lineNum) + ':' +
+                              std::to_string(entry.linePos) + ' ' +
+                              entry.message + '\n';
+                }
+                self->fErrorHandler->compileError(
+                        self->fShaderText, errors.c_str(), /*shaderWasCached=*/false);
+            }
+        }
+
+        const char* fShaderText;
+        ShaderErrorHandler* fErrorHandler;
+        bool fSuccess = false;
+    };
+
+    Handler handler;
+    handler.fShaderText = shaderText;
+    handler.fErrorHandler = errorHandler;
+    module->GetCompilationInfo(&Handler::Fn, &handler);
+
+    return handler.fSuccess;
 }
 
-wgpu::ShaderModule DawnCompileSPIRVShaderModule(const DawnSharedContext* sharedContext,
-                                                const std::string& spirv,
-                                                ShaderErrorHandler* errorHandler) {
-    wgpu::ShaderModuleSPIRVDescriptor spirvDesc;
-    spirvDesc.codeSize = spirv.size() / 4;
-    spirvDesc.code = reinterpret_cast<const uint32_t*>(spirv.c_str());
-
-    // Skia often generates shaders that select a texture/sampler conditionally based on an
-    // attribute (specifically in the case of texture atlas indexing). We disable derivative
-    // uniformity warnings as we expect Skia's behavior to result in well-defined values.
-    wgpu::DawnShaderModuleSPIRVOptionsDescriptor dawnSpirvOptions;
-    dawnSpirvOptions.allowNonUniformDerivatives = true;
+bool DawnCompileWGSLShaderModule(const DawnSharedContext* sharedContext,
+                                 const std::string& wgsl,
+                                 wgpu::ShaderModule* module,
+                                 ShaderErrorHandler* errorHandler) {
+    wgpu::ShaderModuleWGSLDescriptor wgslDesc;
+    wgslDesc.code = wgsl.c_str();
 
     wgpu::ShaderModuleDescriptor desc;
-    desc.nextInChain = &spirvDesc;
-    spirvDesc.nextInChain = &dawnSpirvOptions;
+    desc.nextInChain = &wgslDesc;
 
-    return sharedContext->device().CreateShaderModule(&desc);
+    *module = sharedContext->device().CreateShaderModule(&desc);
+
+    return check_shader_module(module, wgsl.c_str(), errorHandler);
 }
 
 } // namespace skgpu::graphite

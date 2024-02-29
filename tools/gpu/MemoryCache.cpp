@@ -5,7 +5,7 @@
  * found in the LICENSE file.
  */
 
-#include "include/utils/SkBase64.h"
+#include "src/base/SkBase64.h"
 #include "src/core/SkMD5.h"
 #include "src/core/SkReadBuffer.h"
 #include "src/gpu/ganesh/GrPersistentCacheUtils.h"
@@ -19,7 +19,7 @@
 #define LOG_MEMORY_CACHE 0
 
 static SkString data_to_str(const SkData& data) {
-    size_t encodeLength = SkBase64::Encode(data.data(), data.size(), nullptr);
+    size_t encodeLength = SkBase64::EncodedSize(data.size());
     SkString str;
     str.resize(encodeLength);
     SkBase64::Encode(data.data(), data.size(), str.data());
@@ -87,10 +87,7 @@ void MemoryCache::writeShadersToDisk(const char* path, GrBackendApi api) {
 #endif
         hash.write(it->first.fKey->bytes(), bytesToHash);
         SkMD5::Digest digest = hash.finish();
-        SkString md5;
-        for (int i = 0; i < 16; ++i) {
-            md5.appendf("%02x", digest.data[i]);
-        }
+        SkString md5 = digest.toLowercaseHexString();
 
         SkSL::Program::Interface interfacesIgnored[kGrShaderTypeCount];
         std::string shaders[kGrShaderTypeCount];

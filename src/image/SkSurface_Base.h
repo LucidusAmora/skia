@@ -9,18 +9,12 @@
 #define SkSurface_Base_DEFINED
 
 #include "include/core/SkCanvas.h"
-#include "include/core/SkDeferredDisplayList.h" // IWYU pragma: keep
 #include "include/core/SkImage.h"
-#include "include/core/SkPoint.h"
 #include "include/core/SkRefCnt.h"
 #include "include/core/SkSamplingOptions.h"
 #include "include/core/SkScalar.h"
 #include "include/core/SkSurface.h"
 #include "include/core/SkTypes.h"
-
-#if defined(SK_GANESH)
-#include "include/gpu/GrTypes.h"
-#endif
 
 #include <cstdint>
 #include <memory>
@@ -32,10 +26,10 @@ class SkCapabilities;
 class SkColorSpace;
 class SkPaint;
 class SkPixmap;
-class SkSurfaceCharacterization;
+class GrSurfaceCharacterization;
 class SkSurfaceProps;
+enum GrSurfaceOrigin : int;
 enum SkYUVColorSpace : int;
-namespace skgpu { class MutableTextureState; }
 namespace skgpu { namespace graphite { class Recorder; } }
 struct SkIRect;
 struct SkISize;
@@ -78,20 +72,6 @@ public:
     virtual GrRecordingContext* onGetRecordingContext() const;
     virtual skgpu::graphite::Recorder* onGetRecorder() const;
 
-#if defined(SK_GANESH)
-    virtual void onResolveMSAA() {}
-
-    /**
-     * Issue any pending surface IO to the current backend 3D API and resolve any surface MSAA.
-     * Inserts the requested number of semaphores for the gpu to signal when work is complete on the
-     * gpu and inits the array of GrBackendSemaphores with the signaled semaphores.
-     */
-    virtual GrSemaphoresSubmitted onFlush(BackendSurfaceAccess access, const GrFlushInfo&,
-                                          const skgpu::MutableTextureState*) {
-        return GrSemaphoresSubmitted::kNo;
-    }
-#endif
-
     /**
      *  Allocate a canvas that will draw into this surface. We will cache this
      *  canvas, to return the same object to the caller multiple times. We
@@ -113,15 +93,6 @@ public:
      */
     virtual sk_sp<SkImage> onNewImageSnapshot(const SkIRect* subset = nullptr) { return nullptr; }
 
-#if defined(SK_GRAPHITE)
-    virtual sk_sp<SkImage> onAsImage() { return nullptr; }
-
-    virtual sk_sp<SkImage> onMakeImageCopy(const SkIRect* /* subset */,
-                                           skgpu::Mipmapped) {
-        return nullptr;
-    }
-#endif
-
     virtual void onWritePixels(const SkPixmap&, int x, int y) = 0;
 
     /**
@@ -137,6 +108,7 @@ public:
      * Default implementation does a rescale/read/yuv conversion and then calls the callback.
      */
     virtual void onAsyncRescaleAndReadPixelsYUV420(SkYUVColorSpace,
+                                                   bool readAlpha,
                                                    sk_sp<SkColorSpace> dstColorSpace,
                                                    SkIRect srcRect,
                                                    SkISize dstSize,
@@ -169,7 +141,7 @@ public:
      *
      *  Returns false if the backing cannot be un-shared.
      */
-    virtual bool SK_WARN_UNUSED_RESULT onCopyOnWrite(ContentChangeMode) = 0;
+    [[nodiscard]] virtual bool onCopyOnWrite(ContentChangeMode) = 0;
 
     /**
      *  Signal the surface to remind its backing store that it's mutable again.
@@ -187,11 +159,8 @@ public:
         return false;
     }
 
-    virtual bool onCharacterize(SkSurfaceCharacterization*) const { return false; }
-    virtual bool onIsCompatible(const SkSurfaceCharacterization&) const { return false; }
-    virtual bool onDraw(sk_sp<const SkDeferredDisplayList>, SkIPoint offset) {
-        return false;
-    }
+    virtual bool onCharacterize(GrSurfaceCharacterization*) const { return false; }
+    virtual bool onIsCompatible(const GrSurfaceCharacterization&) const { return false; }
 
     // TODO: Remove this (make it pure virtual) after updating Android (which has a class derived
     // from SkSurface_Base).
@@ -206,11 +175,11 @@ public:
     uint32_t newGenerationID();
 
 private:
-    std::unique_ptr<SkCanvas>   fCachedCanvas;
-    sk_sp<SkImage>              fCachedImage;
+    std::unique_ptr<SkCanvas> fCachedCanvas = nullptr;
+    sk_sp<SkImage>            fCachedImage  = nullptr;
 
     // Returns false if drawing should not take place (allocation failure).
-    bool SK_WARN_UNUSED_RESULT aboutToDraw(ContentChangeMode mode);
+    [[nodiscard]] bool aboutToDraw(ContentChangeMode mode);
 
     // Returns true if there is an outstanding image-snapshot, indicating that a call to aboutToDraw
     // would trigger a copy-on-write.

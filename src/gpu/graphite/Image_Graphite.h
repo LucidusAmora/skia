@@ -25,20 +25,26 @@ class Recorder;
 class Image final : public Image_Base {
 public:
     Image(uint32_t uniqueID, TextureProxyView, const SkColorInfo&);
-    Image(TextureProxyView, const SkColorInfo&);
     ~Image() override;
 
     bool onHasMipmaps() const override {
         return fTextureProxyView.proxy()->mipmapped() == skgpu::Mipmapped::kYes;
     }
 
+    bool onIsProtected() const override {
+        return fTextureProxyView.proxy()->isProtected();
+    }
+
     SkImage_Base::Type type() const override { return SkImage_Base::Type::kGraphite; }
+
+    size_t textureSize() const override;
 
     sk_sp<SkImage> onReinterpretColorSpace(sk_sp<SkColorSpace>) const override;
 
-    TextureProxyView textureProxyView() const { return fTextureProxyView; }
+    const TextureProxyView& textureProxyView() const { return fTextureProxyView; }
 
     static sk_sp<TextureProxy> MakePromiseImageLazyProxy(
+            const Caps*,
             SkISize dimensions,
             TextureInfo,
             Volatile,

@@ -7,8 +7,8 @@
 
 #include "dm/DMJsonWriter.h"
 #include "dm/DMSrcSink.h"
-#include "gm/verifiers/gmverifier.h"
 #include "include/codec/SkCodec.h"
+#include "include/codec/SkEncodedImageFormat.h"
 #include "include/core/SkBBHFactory.h"
 #include "include/core/SkColorPriv.h"
 #include "include/core/SkColorSpace.h"
@@ -17,7 +17,10 @@
 #include "include/core/SkGraphics.h"
 #include "src/base/SkHalf.h"
 #include "src/base/SkLeanWindows.h"
+#include "src/base/SkNoDestructor.h"
 #include "src/base/SkSpinlock.h"
+#include "src/base/SkTime.h"
+#include "src/base/SkVx.h"
 #include "src/core/SkChecksum.h"
 #include "src/core/SkColorSpacePriv.h"
 #include "src/core/SkMD5.h"
@@ -29,12 +32,15 @@
 #include "tests/Test.h"
 #include "tests/TestHarness.h"
 #include "tools/AutoreleasePool.h"
+#include "tools/CodecUtils.h"
 #include "tools/HashAndEncode.h"
 #include "tools/ProcStats.h"
 #include "tools/Resources.h"
+#include "tools/TestFontDataProvider.h"
 #include "tools/ToolUtils.h"
 #include "tools/flags/CommonFlags.h"
 #include "tools/flags/CommonFlagsConfig.h"
+#include "tools/fonts/FontToolUtils.h"
 #include "tools/ios_utils.h"
 #include "tools/trace/ChromeTracingTracer.h"
 #include "tools/trace/EventTracingPriv.h"
@@ -66,7 +72,6 @@ using namespace skia_private;
 
 extern bool gSkForceRasterPipelineBlitter;
 extern bool gForceHighPrecisionRasterPipeline;
-extern bool gSkBlobAsSlugTesting;
 extern bool gCreateProtectedContext;
 
 static DEFINE_string(src, "tests gm skp mskp lottie rive svg image colorImage",
@@ -102,7 +107,6 @@ static DEFINE_int(shard,  0, "Which shard do I run?");
 static DEFINE_string(mskps, "", "Directory to read mskps from, or a single mskp file.");
 static DEFINE_bool(forceRasterPipeline, false, "sets gSkForceRasterPipelineBlitter");
 static DEFINE_bool(forceRasterPipelineHP, false, "sets gSkForceRasterPipelineBlitter and gForceHighPrecisionRasterPipeline");
-static DEFINE_bool(blobAsSlugTesting, false, "sets gSkBlobAsSlugTesting");
 static DEFINE_bool(createProtected, false, "attempts to create a protected backend context");
 
 static DEFINE_string(bisect, "",
@@ -124,6 +128,7 @@ static DEFINE_bool2(veryVerbose, V, false, "tell individual tests to be verbose.
 static DEFINE_bool(cpu, true, "Run CPU-bound work?");
 static DEFINE_bool(gpu, true, "Run GPU-bound work?");
 static DEFINE_bool(graphite, true, "Run Graphite work?");
+static DEFINE_bool(neverYieldToWebGPU, false, "Run Graphite with never-yield context option.");
 
 static DEFINE_bool(dryRun, false,
                    "just print the tests that would be run, without actually running them.");
@@ -163,9 +168,6 @@ static DEFINE_string(properties, "",
                      "Space-separated key/value pairs to add to JSON identifying this run.");
 
 static DEFINE_bool(rasterize_pdf, false, "Rasterize PDFs when possible.");
-
-static DEFINE_bool(runVerifiers, false,
-                   "if true, run SkQP-style verification of GM-produced images.");
 
 #if defined(__MSVC_RUNTIME_CHECKS)
 #include <rtcapi.h>
@@ -252,16 +254,18 @@ static void dump_json() {
 }
 
 // We use a spinlock to make locking this in a signal handler _somewhat_ safe.
-static SkSpinlock*        gMutex = new SkSpinlock;
-static int                gPending;
-static TArray<Running>*   gRunning = new TArray<Running>;
+static SkSpinlock                      gMutex;
+static int                             gPending;
+static int                             gTotalCounts;
+static double                          gLastUpdate;
+static SkNoDestructor<TArray<Running>> gRunning;
 
 static void done(const char* config, const char* src, const char* srcOptions, const char* name) {
     SkString id = SkStringPrintf("%s %s %s %s", config, src, srcOptions, name);
-    vlog("done  %s\n", id.c_str());
+    vlog("[%d/%d] %s done\n", gTotalCounts - gPending, gTotalCounts, id.c_str());
     int pending;
     {
-        SkAutoSpinlock lock(*gMutex);
+        SkAutoSpinlock lock(gMutex);
         for (int i = 0; i < gRunning->size(); i++) {
             if (gRunning->at(i).id == id) {
                 gRunning->removeShuffle(i);
@@ -273,25 +277,35 @@ static void done(const char* config, const char* src, const char* srcOptions, co
 
     // We write out dm.json file and print out a progress update every once in a while.
     // Notice this also handles the final dm.json and progress update when pending == 0.
-    if (pending % 500 == 0) {
+    double lastUpdate = gLastUpdate;
+    double now = SkTime::GetNSecs();
+    if (pending % 500 == 0 || now - lastUpdate > 4e9) {
         dump_json();
 
         int curr = sk_tools::getCurrResidentSetSizeMB(),
             peak = sk_tools::getMaxResidentSetSizeMB();
 
-        SkAutoSpinlock lock(*gMutex);
-        info("\n%dMB RAM, %dMB peak, %d queued, %d active:\n",
-             curr, peak, gPending - gRunning->size(), gRunning->size());
-        for (auto& task : *gRunning) {
-            task.dump();
+        SkAutoSpinlock lock(gMutex);
+
+        // Since multiple threads can call `done`, it's possible that another thread has raced with
+        // this one and printed an update since we did our progress check above. We detect this case
+        // by checking to see if `gLastUpdate` has changed; if so, we don't need to print anything.
+        if (lastUpdate == gLastUpdate) {
+            info("\n[%d/%d] %dMB RAM, %dMB peak, %d queued, %d threads:\n\t%s  done\n",
+                 gTotalCounts - gPending, gTotalCounts,
+                 curr, peak, gPending - gRunning->size(), gRunning->size() + 1, id.c_str());
+            for (auto& task : *gRunning) {
+                task.dump();
+            }
+            gLastUpdate = now;
         }
     }
 }
 
 static void start(const char* config, const char* src, const char* srcOptions, const char* name) {
     SkString id = SkStringPrintf("%s %s %s %s", config, src, srcOptions, name);
-    vlog("start %s\n", id.c_str());
-    SkAutoSpinlock lock(*gMutex);
+    vlog("\tstart %s\n", id.c_str());
+    SkAutoSpinlock lock(gMutex);
     gRunning->push_back({id,SkGetThreadID()});
 }
 
@@ -321,7 +335,7 @@ static void find_culprit() {
         #undef _
         };
 
-        SkAutoSpinlock lock(*gMutex);
+        SkAutoSpinlock lock(gMutex);
 
         const DWORD code = e->ExceptionRecord->ExceptionCode;
         info("\nCaught exception %lu", code);
@@ -360,7 +374,7 @@ static void find_culprit() {
     static void (*previous_handler[max_of(SIGABRT,SIGBUS,SIGFPE,SIGILL,SIGSEGV,SIGTERM)+1])(int);
 
     static void crash_handler(int sig) {
-        SkAutoSpinlock lock(*gMutex);
+        SkAutoSpinlock lock(gMutex);
 
         info("\nCaught signal %d [%s] (%dMB RAM, peak %dMB), was running:\n",
              sig, strsignal(sig),
@@ -888,7 +902,7 @@ void gather_file_srcs(const CommandLineFlags::StringArray& flags,
 }
 
 static bool gather_srcs() {
-    for (skiagm::GMFactory f : skiagm::GMRegistry::Range()) {
+    for (const skiagm::GMFactory& f : skiagm::GMRegistry::Range()) {
         push_src("gm", "", new GMSrc(f));
     }
 
@@ -933,7 +947,7 @@ static void push_sink(const SkCommandLineConfig& config, Sink* s) {
 
     // Try a simple Src as a canary.  If it fails, skip this sink.
     struct : public Src {
-        Result draw(SkCanvas* c) const override {
+        Result draw(SkCanvas* c, skiatest::graphite::GraphiteTestContext*) const override {
             c->drawRect(SkRect::MakeWH(1,1), SkPaint());
             return Result::Ok();
         }
@@ -964,10 +978,7 @@ static Sink* create_sink(const GrContextOptions& grCtxOptions, const SkCommandLi
                      "GM tests will be skipped.\n", gpuConfig->getTag().c_str());
                 return nullptr;
             }
-            if (gpuConfig->getTestThreading()) {
-                SkASSERT(!gpuConfig->getTestPersistentCache());
-                return new GPUThreadTestingSink(gpuConfig, grCtxOptions);
-            } else if (gpuConfig->getTestPersistentCache()) {
+            if (gpuConfig->getTestPersistentCache()) {
                 return new GPUPersistentCacheTestingSink(gpuConfig, grCtxOptions);
             } else if (gpuConfig->getTestPrecompile()) {
                 return new GPUPrecompileTestingSink(gpuConfig, grCtxOptions);
@@ -987,10 +998,17 @@ static Sink* create_sink(const GrContextOptions& grCtxOptions, const SkCommandLi
 #if defined(SK_GRAPHITE)
     if (FLAGS_graphite) {
         if (const SkCommandLineConfigGraphite *graphiteConfig = config->asConfigGraphite()) {
-            return new GraphiteSink(graphiteConfig);
+#if defined(SK_ENABLE_PRECOMPILE)
+            if (graphiteConfig->getTestPrecompile()) {
+                return new GraphitePrecompileTestingSink(graphiteConfig);
+            } else
+#endif // SK_ENABLE_PRECOMPILE
+            {
+                return new GraphiteSink(graphiteConfig);
+            }
         }
     }
-#endif
+#endif // SK_GRAPHITE
     if (const SkCommandLineConfigSvg* svgConfig = config->asConfigSvg()) {
         int pageIndex = svgConfig->getPageIndex();
         return new SVGSink(pageIndex);
@@ -1054,6 +1072,12 @@ static Sink* create_via(const SkString& tag, Sink* wrapped) {
 }
 
 static bool gather_sinks(const GrContextOptions& grCtxOptions, bool defaultConfigs) {
+    if (FLAGS_src.size() == 1 && FLAGS_src.contains("tests")) {
+        // If we're just running tests skip trying to accumulate sinks. The 'justOneRect' test
+        // can fail for protected contexts.
+        return true;
+    }
+
     SkCommandLineConfigArray configs;
     ParseConfigs(FLAGS_config, &configs);
     AutoreleasePool pool;
@@ -1164,11 +1188,6 @@ struct Task {
                                     result.c_str()));
             }
 
-            // Run verifiers if specified
-            if (FLAGS_runVerifiers) {
-                RunGMVerifiers(task, bitmap);
-            }
-
             // We're likely switching threads here, so we must capture by value, [=] or [foo,bar].
             SkStreamAsset* data = stream.detachAsStream().release();
             gDefinitelyThreadSafeWork->add([task,name,bitmap,data]{
@@ -1186,10 +1205,7 @@ struct Task {
                         hashAndEncode = std::make_unique<HashAndEncode>(bitmap);
                         hashAndEncode->feedHash(&hash);
                     }
-                    SkMD5::Digest digest = hash.finish();
-                    for (int i = 0; i < 16; i++) {
-                        md5.appendf("%02x", digest.data[i]);
-                    }
+                    md5 = hash.finish().toLowercaseHexString();
                 }
 
                 if (!FLAGS_readPath.isEmpty() &&
@@ -1260,7 +1276,7 @@ struct Task {
                     bool unclamped = false;
                     for (int y = 0; y < pm.height() && !unclamped; ++y)
                     for (int x = 0; x < pm.width() && !unclamped; ++x) {
-                        skvx::float4 rgba = SkHalfToFloat_finite_ftz(*pm.addr64(x, y));
+                        skvx::float4 rgba = from_half(skvx::half4::Load(pm.addr64(x, y)));
                         float a = rgba[3];
                         if (a > 1.0f || any(rgba < 0.0f) || any(rgba > a)) {
                             SkDebugf("[%s] F16Norm pixel [%d, %d] unclamped: (%g, %g, %g, %g)\n",
@@ -1438,23 +1454,6 @@ struct Task {
             }
         }
     }
-
-    static void RunGMVerifiers(const Task& task, const SkBitmap& actualBitmap) {
-        const SkString name = task.src->name();
-        auto verifierList = task.src->getVerifiers();
-        if (verifierList == nullptr) {
-            return;
-        }
-
-        skiagm::verifiers::VerifierResult
-            res = verifierList->verifyAll(task.sink->colorInfo(), actualBitmap);
-        if (!res.ok()) {
-            fail(
-                SkStringPrintf(
-                    "%s %s %s %s: verifier failed: %s", task.sink.tag.c_str(), task.src.tag.c_str(),
-                    task.src.options.c_str(), name.c_str(), res.message().c_str()));
-        }
-    }
 };
 
 /*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
@@ -1520,13 +1519,15 @@ static void run_ganesh_test(skiatest::Test test, const GrContextOptions& grCtxOp
     done("unit", "test", "", test.fName);
 }
 
-static void run_graphite_test(skiatest::Test test) {
+static void run_graphite_test(skiatest::Test test, skiatest::graphite::TestOptions& options) {
     DMReporter reporter;
     if (!FLAGS_dryRun && !should_skip("_", "tests", "_", test.fName)) {
         AutoreleasePool pool;
+        test.modifyGraphiteContextOptions(&options.fContextOptions);
+
         skiatest::ReporterContext ctx(&reporter, SkString(test.fName));
         start("unit", "test", "", test.fName);
-        test.graphite(&reporter);
+        test.graphite(&reporter, options);
     }
     done("unit", "test", "", test.fName);
 }
@@ -1556,12 +1557,10 @@ int main(int argc, char** argv) {
     setbuf(stdout, nullptr);
     setup_crash_handler();
 
-    CommonFlags::SetDefaultFontMgr();
-    CommonFlags::SetAnalyticAA();
+    skiatest::SetFontTestDataDirectory();
 
     gSkForceRasterPipelineBlitter     = FLAGS_forceRasterPipelineHP || FLAGS_forceRasterPipeline;
     gForceHighPrecisionRasterPipeline = FLAGS_forceRasterPipelineHP;
-    gSkBlobAsSlugTesting              = FLAGS_blobAsSlugTesting;
     gCreateProtectedContext           = FLAGS_createProtected;
 
     // The bots like having a verbose.log to upload, so always touch the file even if --verbose.
@@ -1573,16 +1572,22 @@ int main(int argc, char** argv) {
         gVLog = stderr;
     }
 
+    skiatest::graphite::TestOptions graphiteOptions;
+    if (FLAGS_neverYieldToWebGPU) {
+        graphiteOptions.fNeverYieldToWebGPU = true;
+    }
+
     GrContextOptions grCtxOptions;
     CommonFlags::SetCtxOptions(&grCtxOptions);
 
     dump_json();  // It's handy for the bots to assume this is ~never missing.
 
-    SkAutoGraphics ag;
+    SkGraphics::Init();
 #if defined(SK_ENABLE_SVG)
     SkGraphics::SetOpenTypeSVGDecoderFactory(SkSVGOpenTypeSVGDecoder::Make);
 #endif
     SkTaskGroup::Enabler enabled(FLAGS_threads);
+    CodecUtils::RegisterAllAvailable();
 
     if (nullptr == GetResourceAsData("images/color_wheel.png")) {
         info("Some resources are missing.  Do you need to set --resourcePath?\n");
@@ -1593,7 +1598,6 @@ int main(int argc, char** argv) {
     if (!gather_srcs()) {
         return 1;
     }
-    // TODO(dogben): This is a bit ugly. Find a cleaner way to do this.
     bool defaultConfigs = true;
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "--config") == 0) {
@@ -1607,6 +1611,8 @@ int main(int argc, char** argv) {
     gather_tests();
     int testCount = gCPUTests->size() + gGaneshTests->size() + gGraphiteTests->size();
     gPending = gSrcs->size() * gSinks->size() + testCount;
+    gTotalCounts = gPending;
+    gLastUpdate = SkTime::GetNSecs();
     info("%d srcs * %d sinks + %d tests == %d tasks\n",
          gSrcs->size(), gSinks->size(), testCount,
          gPending);
@@ -1620,7 +1626,7 @@ int main(int argc, char** argv) {
             if (src->veto(sink->flags()) ||
                 should_skip(sink.tag.c_str(), src.tag.c_str(),
                             src.options.c_str(), src->name().c_str())) {
-                SkAutoSpinlock lock(*gMutex);
+                SkAutoSpinlock lock(gMutex);
                 gPending--;
                 continue;
             }
@@ -1640,7 +1646,7 @@ int main(int argc, char** argv) {
     // With the parallel work running, run serial tasks and tests here on main thread.
     for (Task& task : serial) { Task::Run(task); }
     for (skiatest::Test& test : *gGaneshTests) { run_ganesh_test(test, grCtxOptions); }
-    for (skiatest::Test& test : *gGraphiteTests) { run_graphite_test(test); }
+    for (skiatest::Test& test : *gGraphiteTests) { run_graphite_test(test, graphiteOptions); }
 
     // Wait for any remaining parallel work to complete (including any spun off of serial tasks).
     parallel.wait();

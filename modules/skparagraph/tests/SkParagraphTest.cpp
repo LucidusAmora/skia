@@ -28,6 +28,7 @@
 #include "modules/skparagraph/include/TextShadow.h"
 #include "modules/skparagraph/include/TextStyle.h"
 #include "modules/skparagraph/include/TypefaceFontProvider.h"
+#include "modules/skparagraph/src/OneLineShaper.h"
 #include "modules/skparagraph/src/ParagraphBuilderImpl.h"
 #include "modules/skparagraph/src/ParagraphImpl.h"
 #include "modules/skparagraph/src/Run.h"
@@ -38,6 +39,8 @@
 #include "src/utils/SkOSPath.h"
 #include "tests/Test.h"
 #include "tools/Resources.h"
+#include "tools/flags/CommandLineFlags.h"
+#include "tools/fonts/FontToolUtils.h"
 
 #include <string.h>
 #include <algorithm>
@@ -51,6 +54,12 @@
 using namespace skia_private;
 
 struct GrContextOptions;
+
+static DEFINE_string(paragraph_fonts, "",
+                     "subdirectory of //resources for fonts to use for these tests");
+static DEFINE_bool(run_paragraph_tests_needing_system_fonts, true,
+                   "Some tests are finicky and need certain system fonts. "
+                   "Set this to false to skip those.");
 
 #define VeryLongCanvasWidth 1000000
 #define TestCanvasWidth 1000
@@ -94,28 +103,38 @@ public:
     ResourceFontCollection(bool testOnly = false)
             : fFontsFound(false)
             , fResolvedFonts(0)
-            , fResourceDir(GetResourcePath("fonts").c_str())
             , fFontProvider(sk_make_sp<TypefaceFontProvider>()) {
+        if (FLAGS_paragraph_fonts.size() == 0) {
+            return;
+        }
+        SkString fontResources = GetResourcePath(FLAGS_paragraph_fonts[0]);
+        const char* fontDir = fontResources.c_str();
         std::vector<SkString> fonts;
-        SkOSFile::Iter iter(fResourceDir.c_str());
+        SkOSFile::Iter iter(fontDir);
 
         SkString path;
         while (iter.next(&path)) {
+            //SkDebugf("font %s\n", path.c_str());
+            // Look for a sentinel font, without which several tests will fail/crash.
             if (path.endsWith("Roboto-Italic.ttf")) {
                 fFontsFound = true;
             }
             fonts.emplace_back(path);
         }
+        SkASSERTF(fFontsFound, "--paragraph_fonts was set but didn't have the fonts we need");
 
-        if (!fFontsFound) {
-            // SkDebugf("Fonts not found, skipping all the tests\n");
-            return;
-        }
-        // Only register fonts if we have to
+        sk_sp<SkFontMgr> mgr = ToolUtils::TestFontMgr();
         for (auto& font : fonts) {
             SkString file_path;
-            file_path.printf("%s/%s", fResourceDir.c_str(), font.c_str());
-            fFontProvider->registerTypeface(SkTypeface::MakeFromFile(file_path.c_str()));
+            file_path.printf("%s/%s", fontDir, font.c_str());
+            auto stream = SkStream::MakeFromFile(file_path.c_str());
+            SkASSERTF(stream, "%s not readable", file_path.c_str());
+            sk_sp<SkTypeface> face = mgr->makeFromStream(std::move(stream), {});
+            // Without --nativeFonts, DM will use the portable test font manager which does
+            // not know how to read in fonts from bytes.
+            SkASSERTF(face, "%s was not turned into a Typeface. Did you set --nativeFonts?",
+                      file_path.c_str());
+            fFontProvider->registerTypeface(face);
         }
 
         if (testOnly) {
@@ -134,7 +153,6 @@ public:
 private:
     bool fFontsFound;
     size_t fResolvedFonts;
-    std::string fResourceDir;
     sk_sp<TypefaceFontProvider> fFontProvider;
 };
 
@@ -201,9 +219,26 @@ private:
 };
 }  // namespace
 
+// Skip tests which do not find the fonts, unless the user set --paragraph_fonts in which case
+// we should make a loud error.
+#define SKIP_IF_FONTS_NOT_FOUND(r, fontCollection)           \
+    if (!fontCollection->fontsFound()) {                     \
+        if (FLAGS_paragraph_fonts.size() != 0) {             \
+            ERRORF(r, "SkParagraphTests Fonts not found!");  \
+        }                                                    \
+        return;                                              \
+    }
+
+#define NEED_SYSTEM_FONTS(fontCollection)                            \
+    if (!FLAGS_run_paragraph_tests_needing_system_fonts) {           \
+        return;                                                      \
+    }                                                                \
+    fontCollection->setDefaultFontManager(ToolUtils::TestFontMgr()); \
+    fontCollection->enableFontFallback();
+
 UNIX_ONLY_TEST(SkParagraph_SimpleParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     const char* text = "Hello World Text Dialog";
     const size_t len = strlen(text);
 
@@ -239,45 +274,47 @@ UNIX_ONLY_TEST(SkParagraph_SimpleParagraph, reporter) {
     }
 }
 
-UNIX_ONLY_TEST(SkParagraph_Rounding_OFF, reporter) {
-    // To be removed after migration.
-    if (std::getenv("SKPARAGRAPH_REMOVE_ROUNDING_HACK") == nullptr) return;
+UNIX_ONLY_TEST(SkParagraph_Rounding_Off_LineBreaks, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
-    const char* text = "abc";
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    const char* text = "AAAAAAAAAA";
     const size_t len = strlen(text);
 
     ParagraphStyle paragraph_style;
     paragraph_style.turnHintingOff();
-    ParagraphBuilderImpl builder(paragraph_style, fontCollection);
-
+    paragraph_style.setApplyRoundingHack(false);
     TextStyle text_style;
     text_style.setFontFamilies({SkString("Ahem")});
     text_style.setColor(SK_ColorBLACK);
 
-    text_style.setFontSize(1.5f);
-    builder.pushStyle(text_style);
-    builder.addText(text, len);
-    builder.pop();
+    auto testFontSize = {1.5f, 10.0f/3, 10.0f/6, 10.0f};
+    for (auto fontSize : testFontSize) {
+        ParagraphBuilderImpl builder(paragraph_style, fontCollection);
+        text_style.setFontSize(fontSize);
+        builder.pushStyle(text_style);
+        builder.addText(text, len);
+        builder.pop();
 
-    auto paragraph = builder.Build();
-    // Slightly wider than the max intrinsic width.
-    paragraph->layout(4.6f);
-    REPORTER_ASSERT(reporter, paragraph->unresolvedGlyphs() == 0);
+        auto paragraph = builder.Build();
+        paragraph->layout(SK_ScalarInfinity);
+        // Slightly wider than the max intrinsic width.
+        REPORTER_ASSERT(reporter, paragraph->unresolvedGlyphs() == 0);
+        paragraph->layout(paragraph->getMaxIntrinsicWidth());
 
-    ParagraphImpl* impl = static_cast<ParagraphImpl*>(paragraph.get());
+        ParagraphImpl* impl = static_cast<ParagraphImpl*>(paragraph.get());
 
-    REPORTER_ASSERT(reporter, impl->lines().size() == 1);
-    auto& line = impl->lines()[0];
+        REPORTER_ASSERT(reporter, impl->lines().size() == 1);
+        auto& line = impl->lines()[0];
 
-    const LineMetrics metrics = line.getMetrics();
-    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(metrics.fWidth, 4.5f, EPSILON100));
+        const LineMetrics metrics = line.getMetrics();
+        REPORTER_ASSERT(reporter, SkScalarNearlyEqual(metrics.fWidth, fontSize * len, EPSILON2));
+    }
 }
 
 UNIX_ONLY_TEST(SkParagraph_InlinePlaceholderParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
     TestCanvas canvas("SkParagraph_InlinePlaceholderParagraph.png");
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     const char* text = "012 34";
     const size_t len = strlen(text);
@@ -376,7 +413,7 @@ UNIX_ONLY_TEST(SkParagraph_InlinePlaceholderParagraph, reporter) {
 UNIX_ONLY_TEST(SkParagraph_InlinePlaceholderBaselineParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
     TestCanvas canvas("SkParagraph_InlinePlaceholderBaselineParagraph.png");
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     const char* text = "012 34";
     const size_t len = strlen(text);
@@ -432,7 +469,7 @@ UNIX_ONLY_TEST(SkParagraph_InlinePlaceholderBaselineParagraph, reporter) {
 UNIX_ONLY_TEST(SkParagraph_InlinePlaceholderAboveBaselineParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
     TestCanvas canvas("SkParagraph_InlinePlaceholderAboveBaselineParagraph.png");
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     const char* text = "012 34";
     const size_t len = strlen(text);
@@ -488,7 +525,7 @@ UNIX_ONLY_TEST(SkParagraph_InlinePlaceholderAboveBaselineParagraph, reporter) {
 UNIX_ONLY_TEST(SkParagraph_InlinePlaceholderBelowBaselineParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
     TestCanvas canvas("SkParagraph_InlinePlaceholderBelowBaselineParagraph.png");
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     const char* text = "012 34";
     const size_t len = strlen(text);
@@ -544,7 +581,7 @@ UNIX_ONLY_TEST(SkParagraph_InlinePlaceholderBelowBaselineParagraph, reporter) {
 UNIX_ONLY_TEST(SkParagraph_InlinePlaceholderBottomParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
     TestCanvas canvas("SkParagraph_InlinePlaceholderBottomParagraph.png");
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     const char* text = "012 34";
     const size_t len = strlen(text);
@@ -598,7 +635,7 @@ UNIX_ONLY_TEST(SkParagraph_InlinePlaceholderBottomParagraph, reporter) {
 UNIX_ONLY_TEST(SkParagraph_InlinePlaceholderTopParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
     TestCanvas canvas("SkParagraph_InlinePlaceholderTopParagraph.png");
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     const char* text = "012 34";
     const size_t len = strlen(text);
@@ -652,7 +689,7 @@ UNIX_ONLY_TEST(SkParagraph_InlinePlaceholderTopParagraph, reporter) {
 UNIX_ONLY_TEST(SkParagraph_InlinePlaceholderMiddleParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
     TestCanvas canvas("SkParagraph_InlinePlaceholderMiddleParagraph.png");
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     const char* text = "012 34";
     const size_t len = strlen(text);
@@ -706,7 +743,7 @@ UNIX_ONLY_TEST(SkParagraph_InlinePlaceholderMiddleParagraph, reporter) {
 UNIX_ONLY_TEST(SkParagraph_InlinePlaceholderIdeographicBaselineParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
     TestCanvas canvas("SkParagraph_InlinePlaceholderIdeographicBaselineParagraph.png");
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     const char* text = "給能上目秘使";
     const size_t len = strlen(text);
@@ -759,7 +796,7 @@ UNIX_ONLY_TEST(SkParagraph_InlinePlaceholderIdeographicBaselineParagraph, report
 UNIX_ONLY_TEST(SkParagraph_InlinePlaceholderBreakParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
     TestCanvas canvas("SkParagraph_InlinePlaceholderBreakParagraph.png");
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     const char* text = "012 34";
     const size_t len = strlen(text);
@@ -894,7 +931,7 @@ UNIX_ONLY_TEST(SkParagraph_InlinePlaceholderBreakParagraph, reporter) {
 UNIX_ONLY_TEST(SkParagraph_InlinePlaceholderGetRectsParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
     TestCanvas canvas("SkParagraph_InlinePlaceholderGetRectsParagraph.png");
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     const char* text = "012 34";
     const size_t len = strlen(text);
@@ -1021,7 +1058,7 @@ UNIX_ONLY_TEST(SkParagraph_InlinePlaceholderGetRectsParagraph, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_SimpleRedParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     const char* text = "I am RED";
     const size_t len = strlen(text);
 
@@ -1061,7 +1098,7 @@ UNIX_ONLY_TEST(SkParagraph_SimpleRedParagraph, reporter) {
 UNIX_ONLY_TEST(SkParagraph_RainbowParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
     TestCanvas canvas("SkParagraph_RainbowParagraph.png");
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     const char* text1 = "Red Roboto"; // [0:10)
     const char* text2 = "big Greeen Default"; // [10:28)
     const char* text3 = "Defcolor Homemade Apple"; // [28:51)
@@ -1183,7 +1220,7 @@ UNIX_ONLY_TEST(SkParagraph_RainbowParagraph, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_DefaultStyleParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_DefaultStyleParagraph.png");
     const char* text = "No TextStyle! Uh Oh!";
     const size_t len = strlen(text);
@@ -1223,7 +1260,7 @@ UNIX_ONLY_TEST(SkParagraph_DefaultStyleParagraph, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_BoldParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_BoldParagraph.png");
     const char* text = "This is Red max bold text!";
     const size_t len = strlen(text);
@@ -1269,7 +1306,7 @@ UNIX_ONLY_TEST(SkParagraph_BoldParagraph, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_HeightOverrideParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_HeightOverrideParagraph.png");
     const char* text = "01234満毎冠行来昼本可\nabcd\n満毎冠行来昼本可";
     const size_t len = strlen(text);
@@ -1324,10 +1361,7 @@ UNIX_ONLY_TEST(SkParagraph_HeightOverrideParagraph, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_BasicHalfLeading, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-
-    if (!fontCollection->fontsFound()) {
-      return;
-    }
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     const char* text = "01234満毎冠行来昼本可\nabcd\n満毎冠行来昼本可";
     const size_t len = strlen(text);
@@ -1385,10 +1419,7 @@ UNIX_ONLY_TEST(SkParagraph_BasicHalfLeading, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_NearZeroHeightMixedDistribution, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-
-    if (!fontCollection->fontsFound()) {
-      return;
-    }
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     const char* text = "Cookies need love";
     const size_t len = strlen(text);
@@ -1476,12 +1507,74 @@ UNIX_ONLY_TEST(SkParagraph_NearZeroHeightMixedDistribution, reporter) {
     REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.left(), 0, EPSILON100));
 }
 
-UNIX_ONLY_TEST(SkParagraph_StrutHalfLeading, reporter) {
+UNIX_ONLY_TEST(SkParagraph_StrutHalfLeadingSimple, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
-    if (!fontCollection->fontsFound()) {
-        return;
-    }
+    const char* text = "A";
+    const size_t len = strlen(text);
+
+    TestCanvas canvas("SkParagraph_StrutHalfLeading.png");
+
+    ParagraphStyle paragraph_style;
+    TextStyle text_style;
+    text_style.setFontFamilies({SkString("Roboto")});
+    text_style.setFontSize(100.0f);
+    text_style.setColor(SK_ColorBLACK);
+    text_style.setLetterSpacing(0.0f);
+    text_style.setWordSpacing(0.0f);
+    text_style.setHeightOverride(true);
+    text_style.setHeight(2.0f);
+    text_style.setHalfLeading(true);
+
+    StrutStyle strut_style;
+    strut_style.setFontFamilies({SkString("Roboto")});
+    strut_style.setFontSize(100.0f);
+    strut_style.setHeightOverride(true);
+    strut_style.setHeight(2.0f);
+    strut_style.setHalfLeading(true);
+    strut_style.setStrutEnabled(true);
+    strut_style.setForceStrutHeight(true);
+
+    paragraph_style.setStrutStyle(strut_style);
+    paragraph_style.setTextStyle(text_style);
+    ParagraphBuilderImpl builder(paragraph_style, fontCollection);
+
+    builder.pushStyle(text_style);
+    builder.addText(text);
+
+    auto paragraph = builder.Build();
+    paragraph->layout(550);
+
+    auto impl = static_cast<ParagraphImpl*>(paragraph.get());
+    REPORTER_ASSERT(reporter, impl->styles().size() == 1);  // paragraph style does not count
+
+    paragraph->paint(canvas.get(), 0, 0);
+
+    const RectWidthStyle rect_width_style = RectWidthStyle::kTight;
+    std::vector<TextBox> boxes = paragraph->getRectsForRange(0, len, RectHeightStyle::kTight, rect_width_style);
+    std::vector<TextBox> lineBoxes = paragraph->getRectsForRange(0, len, RectHeightStyle::kMax, rect_width_style);
+
+    canvas.drawRects(SK_ColorBLUE, boxes);
+    REPORTER_ASSERT(reporter, lineBoxes.size() == boxes.size());
+
+    // line spacing is distributed evenly over and under the text.
+    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(lineBoxes[0].rect.bottom() - boxes[0].rect.bottom(), boxes[0].rect.top() - lineBoxes[0].rect.top()));
+    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(lineBoxes[0].rect.top(), 0.0f));
+    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(lineBoxes[0].rect.left(), 0.0f));
+
+    std::vector<LineMetrics> lineMetrics;
+    paragraph->getLineMetrics(lineMetrics);
+    LineMetrics& firstLine = lineMetrics[0];
+    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(firstLine.fHeight, 200.0f));
+
+    // Half leading does not move the text horizontally.
+    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[1].rect.left(), 0, EPSILON100));
+}
+
+UNIX_ONLY_TEST(SkParagraph_StrutHalfLeadingMultiline, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     const char* text = "01234満毎冠行来昼本可\nabcd\n満毎冠行来昼本可";
     const size_t len = strlen(text);
@@ -1489,24 +1582,27 @@ UNIX_ONLY_TEST(SkParagraph_StrutHalfLeading, reporter) {
     TestCanvas canvas("SkParagraph_StrutHalfLeading.png");
 
     ParagraphStyle paragraph_style;
-    // Tiny font and height multiplier to ensure the height is entirely decided
-    // by the strut.
     TextStyle text_style;
     text_style.setFontFamilies({SkString("Roboto")});
-    text_style.setFontSize(1.0f);
+    text_style.setFontSize(20.0f);
     text_style.setColor(SK_ColorBLACK);
     text_style.setLetterSpacing(0.0f);
     text_style.setWordSpacing(0.0f);
-    text_style.setHeight(0.1f);
+    text_style.setHeightOverride(true);
+    text_style.setHeight(3.0f);
+    text_style.setHalfLeading(true);
 
     StrutStyle strut_style;
     strut_style.setFontFamilies({SkString("Roboto")});
     strut_style.setFontSize(20.0f);
-    strut_style.setHeight(3.6345f);
+    strut_style.setHeightOverride(true);
+    strut_style.setHeight(3.0f);
     strut_style.setHalfLeading(true);
     strut_style.setStrutEnabled(true);
     strut_style.setForceStrutHeight(true);
 
+    paragraph_style.setStrutStyle(strut_style);
+    paragraph_style.setTextStyle(text_style);
     ParagraphBuilderImpl builder(paragraph_style, fontCollection);
 
     builder.pushStyle(text_style);
@@ -1545,10 +1641,7 @@ UNIX_ONLY_TEST(SkParagraph_StrutHalfLeading, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_TrimLeadingDistribution, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-
-    if (!fontCollection->fontsFound()) {
-      return;
-    }
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     const char* text = "01234満毎冠行来昼本可\nabcd\n満毎冠行来昼本可";
     const size_t len = strlen(text);
@@ -1611,7 +1704,7 @@ UNIX_ONLY_TEST(SkParagraph_TrimLeadingDistribution, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_LeftAlignParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_LeftAlignParagraph.png");
     const char* text =
             "This is a very long sentence to test if the text will properly wrap "
@@ -1695,7 +1788,7 @@ UNIX_ONLY_TEST(SkParagraph_LeftAlignParagraph, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_RightAlignParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_RightAlignParagraph.png");
     const char* text =
             "This is a very long sentence to test if the text will properly wrap "
@@ -1782,7 +1875,7 @@ UNIX_ONLY_TEST(SkParagraph_RightAlignParagraph, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_CenterAlignParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_CenterAlignParagraph.png");
     const char* text =
             "This is a very long sentence to test if the text will properly wrap "
@@ -1869,7 +1962,7 @@ UNIX_ONLY_TEST(SkParagraph_CenterAlignParagraph, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_JustifyAlignParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_JustifyAlignParagraph.png");
     const char* text =
             "This is a very long sentence to test if the text will properly wrap "
@@ -1957,12 +2050,14 @@ UNIX_ONLY_TEST(SkParagraph_JustifyAlignParagraph, reporter) {
 // Checked: DIFF (ghost spaces as a separate box in TxtLib)
 UNIX_ONLY_TEST(SkParagraph_JustifyRTL, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>(true);
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_JustifyRTL.png");
     const char* text =
             "אאא בּבּבּבּ אאאא בּבּ אאא בּבּבּ אאאאא בּבּבּבּ אאאא בּבּבּבּבּ "
             "אאאאא בּבּבּבּבּ אאאבּבּבּבּבּבּאאאאא בּבּבּבּבּבּאאאאאבּבּבּבּבּבּ אאאאא בּבּבּבּבּ "
-            "אאאאא בּבּבּבּבּבּ אאאאא בּבּבּבּבּבּ אאאאא בּבּבּבּבּבּ אאאאא בּבּבּבּבּבּ אאאאא בּבּבּבּבּבּ";
+            "אאאאא בּבּבּבּבּבּ אאאאא בּבּבּבּבּבּ אאאאא בּבּבּבּבּבּ אאאאא בּבּבּבּבּבּ "
+            "אאאאאבּבּבּבּבּבּאאאאאבּבּבּבּבּבּאאאאאבּבּבּבּבּבּ "
+            "אאאאא בּבּבּבּבּבּ";
     const size_t len = strlen(text);
 
     ParagraphStyle paragraph_style;
@@ -1990,8 +2085,10 @@ UNIX_ONLY_TEST(SkParagraph_JustifyRTL, reporter) {
         return TestCanvasWidth - 100 - line.width();
     };
     for (auto& line : impl->lines()) {
-        if (&line == &impl->lines().back()) {
+        if (&line == &impl->lines().back() || &line == &impl->lines()[impl->lines().size() - 2]) {
+            // Second-last line will be also right-aligned because it is only one cluster
             REPORTER_ASSERT(reporter, calculate(line) > EPSILON100);
+            REPORTER_ASSERT(reporter, line.offset().fX > EPSILON100);
         } else {
             REPORTER_ASSERT(reporter, SkScalarNearlyEqual(calculate(line), 0, EPSILON100));
         }
@@ -2009,19 +2106,28 @@ UNIX_ONLY_TEST(SkParagraph_JustifyRTL, reporter) {
     canvas.drawRects(SK_ColorRED, boxes);
     REPORTER_ASSERT(reporter, boxes.size() == 3);
 
-    boxes = paragraph->getRectsForRange(240, 250, rect_height_style, rect_width_style);
+    boxes = paragraph->getRectsForRange(226, 278, rect_height_style, rect_width_style);
+    canvas.drawRects(SK_ColorYELLOW, boxes);
+    REPORTER_ASSERT(reporter, boxes.size() == 1);
+
+    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.left(), 16, EPSILON100));
+    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.top(), 130, EPSILON100));
+    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.right(), 900, EPSILON100));
+    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.bottom(), 156, EPSILON100));
+
+    boxes = paragraph->getRectsForRange(292, 296, rect_height_style, rect_width_style);
     canvas.drawRects(SK_ColorBLUE, boxes);
     REPORTER_ASSERT(reporter, boxes.size() == 1);
 
     REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.left(), 588, EPSILON100));
-    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.top(), 130, EPSILON100));
+    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.top(), 156, EPSILON100));
     REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.right(), 640, EPSILON100));
-    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.bottom(), 156, EPSILON100));
+    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.bottom(), 182, EPSILON100));
 }
 
 UNIX_ONLY_TEST(SkParagraph_JustifyRTLNewLine, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>(true);
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_JustifyRTLNewLine.png");
     const char* text =
             "אאא בּבּבּבּ אאאא\nבּבּ אאא בּבּבּ אאאאא בּבּבּבּ אאאא בּבּבּבּבּ "
@@ -2096,7 +2202,7 @@ UNIX_ONLY_TEST(SkParagraph_JustifyRTLNewLine, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_LeadingSpaceRTL, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>(true);
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_LeadingSpaceRTL.png");
 
     const char* text = " leading space";
@@ -2139,7 +2245,7 @@ UNIX_ONLY_TEST(SkParagraph_LeadingSpaceRTL, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_DecorationsParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_DecorationsParagraph.png");
     const char* text1 = "This text should be";
     const char* text2 = " decorated even when";
@@ -2260,7 +2366,7 @@ UNIX_ONLY_TEST(SkParagraph_DecorationsParagraph, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_ItalicsParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_ItalicsParagraph.png");
     const char* text1 = "No italic ";
     const char* text2 = "Yes Italic ";
@@ -2324,10 +2430,10 @@ UNIX_ONLY_TEST(SkParagraph_ItalicsParagraph, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_ChineseParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_ChineseParagraph.png");
     const char* text =
-            "左線読設重説切後碁給能上目秘使約。満毎冠行来昼本可必図将発確年。今属場育"
+            "     左線読設重説切後碁給能上目秘使約。満毎冠行来昼本可必図将発確年。今属場育"
             "図情闘陰野高備込制詩西校客。審対江置講今固残必託地集済決維駆年策。立得庭"
             "際輝求佐抗蒼提夜合逃表。注統天言件自謙雅載報紙喪。作画稿愛器灯女書利変探"
             "訃第金線朝開化建。子戦年帝励害表月幕株漠新期刊人秘。図的海力生禁挙保天戦"
@@ -2373,7 +2479,7 @@ UNIX_ONLY_TEST(SkParagraph_ChineseParagraph, reporter) {
 // Checked: disabled for TxtLib
 UNIX_ONLY_TEST(SkParagraph_ArabicParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_ArabicParagraph.png");
     const char* text =
             "من أسر وإعلان الخاصّة وهولندا،, عل قائمة الضغوط بالمطالبة تلك. الصفحة "
@@ -2419,7 +2525,7 @@ UNIX_ONLY_TEST(SkParagraph_ArabicParagraph, reporter) {
 UNIX_ONLY_TEST(SkParagraph_ArabicRectsParagraph, reporter) {
 
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_ArabicRectsParagraph.png");
     const char* text = "بمباركة التقليدية قام عن. تصفح يد    ";
     const size_t len = strlen(text);
@@ -2457,8 +2563,8 @@ UNIX_ONLY_TEST(SkParagraph_ArabicRectsParagraph, reporter) {
 
     REPORTER_ASSERT(reporter, boxes.size() == 1ull);
 
-    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.left(), 538.548f, EPSILON100));  // DIFF: 510.09375
-    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.top(), -0.268f, EPSILON100));
+    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.left(), 538.120f, EPSILON100));  // DIFF: 510.09375
+    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.top(), -0.280f, EPSILON100));
     REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.right(),  900, EPSILON100));
     REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.bottom(), 44, EPSILON100));
 }
@@ -2470,7 +2576,7 @@ UNIX_ONLY_TEST(SkParagraph_ArabicRectsParagraph, reporter) {
 UNIX_ONLY_TEST(SkParagraph_ArabicRectsLTRLeftAlignParagraph, reporter) {
 
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_ArabicRectsLTRLeftAlignParagraph.png");
     const char* text = "Helloبمباركة التقليدية قام عن. تصفح يد ";
     const size_t len = strlen(text);
@@ -2508,17 +2614,17 @@ UNIX_ONLY_TEST(SkParagraph_ArabicRectsLTRLeftAlignParagraph, reporter) {
     canvas.drawRects(SK_ColorRED, boxes);
 
     REPORTER_ASSERT(reporter, boxes.size() == 2ull);
-    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.left(), 83.92f, EPSILON100));  // DIFF: 89.40625
+    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.left(), 65.65f, EPSILON100));  // DIFF: 89.40625
     REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.top(), -0.27f, EPSILON100));
-    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.right(), 105.16f, EPSILON100)); // DIFF: 121.87891
-    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.bottom(), 44, EPSILON100));
+    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.right(), 86.89f, EPSILON100)); // DIFF: 121.87891
+    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.bottom(), 44.0f, EPSILON100));
 }
 
 // Checked DIFF+
 UNIX_ONLY_TEST(SkParagraph_ArabicRectsLTRRightAlignParagraph, reporter) {
 
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_ArabicRectsLTRRightAlignParagraph.png");
     const char* text = "Helloبمباركة التقليدية قام عن. تصفح يد ";
     const size_t len = strlen(text);
@@ -2556,15 +2662,15 @@ UNIX_ONLY_TEST(SkParagraph_ArabicRectsLTRRightAlignParagraph, reporter) {
     canvas.drawRects(SK_ColorRED, boxes);
 
     REPORTER_ASSERT(reporter, boxes.size() == 2ull); // DIFF
-    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.left(), 561.5f, EPSILON100));         // DIFF
+    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.left(), 561.1f, EPSILON100));         // DIFF
     REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.top(), -0.27f, EPSILON100));
-    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.right(), 582.74f, EPSILON100));       // DIFF
+    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.right(), 582.34f, EPSILON100));       // DIFF
     REPORTER_ASSERT(reporter, SkScalarNearlyEqual(boxes[0].rect.bottom(), 44, EPSILON100));
 }
 
 UNIX_ONLY_TEST(SkParagraph_GetGlyphPositionAtCoordinateParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_GetGlyphPositionAtCoordinateParagraph.png");
     const char* text =
             "12345 67890 12345 67890 12345 67890 12345 67890 12345 67890 12345 "
@@ -2628,7 +2734,7 @@ UNIX_ONLY_TEST(SkParagraph_GetGlyphPositionAtCoordinateParagraph, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_GetRectsForRangeParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_GetRectsForRangeParagraph.png");
     const char* text =
             "12345,  \"67890\" 12345 67890 12345 67890 12345 67890 12345 67890 12345 "
@@ -2724,7 +2830,7 @@ UNIX_ONLY_TEST(SkParagraph_GetRectsForRangeParagraph, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_GetRectsForRangeTight, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_GetRectsForRangeTight.png");
     const char* text =
             "(　´･‿･｀)(　´･‿･｀)(　´･‿･｀)(　´･‿･｀)(　´･‿･｀)(　´･‿･｀)(　´･‿･｀)("
@@ -2796,7 +2902,7 @@ UNIX_ONLY_TEST(SkParagraph_GetRectsForRangeTight, reporter) {
 // Checked: DIFF+
 UNIX_ONLY_TEST(SkParagraph_GetRectsForRangeIncludeLineSpacingMiddle, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_GetRectsForRangeIncludeLineSpacingMiddle.png");
     const char* text =
             "(　´･‿･｀)(　´･‿･｀)(　´･‿･｀)(　´･‿･｀)(　´･‿･｀)(　´･‿･｀)(　´･‿･｀)("
@@ -2918,7 +3024,7 @@ UNIX_ONLY_TEST(SkParagraph_GetRectsForRangeIncludeLineSpacingMiddle, reporter) {
 // Checked: NO DIFF+
 UNIX_ONLY_TEST(SkParagraph_GetRectsForRangeIncludeLineSpacingTop, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_GetRectsForRangeIncludeLineSpacingTop.png");
     const char* text =
             "(　´･‿･｀)(　´･‿･｀)(　´･‿･｀)(　´･‿･｀)(　´･‿･｀)(　´･‿･｀)(　´･‿･｀)("
@@ -3040,7 +3146,7 @@ UNIX_ONLY_TEST(SkParagraph_GetRectsForRangeIncludeLineSpacingTop, reporter) {
 // Checked: NO DIFF+
 UNIX_ONLY_TEST(SkParagraph_GetRectsForRangeIncludeLineSpacingBottom, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_GetRectsForRangeIncludeLineSpacingBottom.png");
     const char* text =
             "(　´･‿･｀)(　´･‿･｀)(　´･‿･｀)(　´･‿･｀)(　´･‿･｀)(　´･‿･｀)(　´･‿･｀)("
@@ -3163,7 +3269,7 @@ UNIX_ONLY_TEST(SkParagraph_GetRectsForRangeIncludeLineSpacingBottom, reporter) {
 // Any text range gets a smallest glyph rectangle
 DEF_TEST_DISABLED(SkParagraph_GetRectsForRangeIncludeCombiningCharacter, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_GetRectsForRangeIncludeCombiningCharacter.png");
     const char* text = "ดีสวัสดีชาวโลกที่น่ารัก";
     const size_t len = strlen(text);
@@ -3226,7 +3332,7 @@ DEF_TEST_DISABLED(SkParagraph_GetRectsForRangeIncludeCombiningCharacter, reporte
 // Checked: NO DIFF
 UNIX_ONLY_TEST(SkParagraph_GetRectsForRangeCenterParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_GetRectsForRangeCenterParagraph.png");
     // Minikin uses a hard coded list of unicode characters that he treats as invisible - as spaces.
     // It's absolutely wrong - invisibility is a glyph attribute, not character/grapheme.
@@ -3324,7 +3430,7 @@ UNIX_ONLY_TEST(SkParagraph_GetRectsForRangeCenterParagraph, reporter) {
 // Checked DIFF+
 UNIX_ONLY_TEST(SkParagraph_GetRectsForRangeCenterParagraphNewlineCentered, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_GetRectsForRangeCenterParagraphNewlineCentered.png");
     const char* text = "01234\n";
     const size_t len = strlen(text);
@@ -3386,7 +3492,7 @@ UNIX_ONLY_TEST(SkParagraph_GetRectsForRangeCenterParagraphNewlineCentered, repor
 // Checked NO DIFF
 UNIX_ONLY_TEST(SkParagraph_GetRectsForRangeCenterMultiLineParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_GetRectsForRangeCenterMultiLineParagraph.png");
     const char* text = "01234  　 \n0123　        "; // includes ideographic space and english space.
     const size_t len = strlen(text);
@@ -3488,7 +3594,7 @@ UNIX_ONLY_TEST(SkParagraph_GetRectsForRangeCenterMultiLineParagraph, reporter) {
 // Checked: DIFF (line height rounding error)
 UNIX_ONLY_TEST(SkParagraph_GetRectsForRangeStrut, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_GetRectsForRangeStrut.png");
     const char* text = "Chinese 字典";
     const size_t len = strlen(text);
@@ -3532,10 +3638,87 @@ UNIX_ONLY_TEST(SkParagraph_GetRectsForRangeStrut, reporter) {
     }
 }
 
-// Checked: NO DIFF
+UNIX_ONLY_TEST(SkParagraph_GetRectsForRangeStrutWithHeight, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    const char* text = "A";
+    const size_t len = strlen(text);
+
+    StrutStyle strutStyle;
+    strutStyle.setStrutEnabled(true);
+    strutStyle.setFontFamilies({SkString("Roboto")});
+    strutStyle.setFontSize(14.0);
+    strutStyle.setHeightOverride(true);
+    strutStyle.setHeight(2.0);
+    strutStyle.setLeading(3.0);
+
+    ParagraphStyle paragraphStyle;
+    paragraphStyle.setStrutStyle(strutStyle);
+
+    TextStyle textStyle;
+    textStyle.setFontFamilies({SkString("Roboto")});
+    textStyle.setFontSize(10);
+    textStyle.setColor(SK_ColorBLACK);
+
+    ParagraphBuilderImpl builder(paragraphStyle, fontCollection);
+    builder.pushStyle(textStyle);
+    builder.addText(text, len);
+    builder.pop();
+
+    auto paragraph = builder.Build();
+    paragraph->layout(550);
+
+    auto result = paragraph->getRectsForRange(0, 1, RectHeightStyle::kStrut, RectWidthStyle::kMax);
+    REPORTER_ASSERT(reporter, result.size() == 1);
+    // Half of the strut leading: 3.0 * 14.0 / 2
+    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(result[0].rect.top(), 21.0, EPSILON100));
+    // Strut height 2.0 * 14.0
+    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(result[0].rect.height(), 28.0, EPSILON100));
+}
+
+UNIX_ONLY_TEST(SkParagraph_GetRectsForRangeStrutWithHeightAndHalfLeading, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    const char* text = "A";
+    const size_t len = strlen(text);
+
+    StrutStyle strutStyle;
+    strutStyle.setStrutEnabled(true);
+    strutStyle.setFontFamilies({SkString("Roboto")});
+    strutStyle.setFontSize(14.0);
+    strutStyle.setHeightOverride(true);
+    strutStyle.setHeight(2.0);
+    strutStyle.setLeading(3.0);
+    strutStyle.setHalfLeading(true);
+
+    ParagraphStyle paragraphStyle;
+    paragraphStyle.setStrutStyle(strutStyle);
+
+    TextStyle textStyle;
+    textStyle.setFontFamilies({SkString("Roboto")});
+    textStyle.setFontSize(10);
+    textStyle.setColor(SK_ColorBLACK);
+
+    ParagraphBuilderImpl builder(paragraphStyle, fontCollection);
+    builder.pushStyle(textStyle);
+    builder.addText(text, len);
+    builder.pop();
+
+    auto paragraph = builder.Build();
+    paragraph->layout(550);
+
+    // Produces the same results as halfLeading = false.
+    auto result = paragraph->getRectsForRange(0, 1, RectHeightStyle::kStrut, RectWidthStyle::kMax);
+    REPORTER_ASSERT(reporter, result.size() == 1);
+    // Half of the strut leading: 3.0 * 14.0 / 2
+    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(result[0].rect.top(), 21.0, EPSILON100));
+    // Strut height 2.0 * 14.0
+    REPORTER_ASSERT(reporter, SkScalarNearlyEqual(result[0].rect.height(), 28.0, EPSILON100));
+}
+
 UNIX_ONLY_TEST(SkParagraph_GetRectsForRangeStrutFallback, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_GetRectsForRangeStrutFallback.png");
     const char* text = "Chinese 字典";
     const size_t len = strlen(text);
@@ -3575,7 +3758,7 @@ UNIX_ONLY_TEST(SkParagraph_GetRectsForRangeStrutFallback, reporter) {
 // Checked: DIFF (small in numbers)
 UNIX_ONLY_TEST(SkParagraph_GetWordBoundaryParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_GetWordBoundaryParagraph.png");
     const char* text = "12345  67890 12345 67890 12345 67890 12345 "
                        "67890 12345 67890 12345 67890 12345";
@@ -3651,7 +3834,7 @@ UNIX_ONLY_TEST(SkParagraph_GetWordBoundaryParagraph, reporter) {
 // Checked: DIFF (unclear)
 UNIX_ONLY_TEST(SkParagraph_SpacingParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_SpacingParagraph.png");
     ParagraphStyle paragraph_style;
     paragraph_style.setMaxLines(10);
@@ -3734,7 +3917,7 @@ UNIX_ONLY_TEST(SkParagraph_SpacingParagraph, reporter) {
 // Checked: NO DIFF
 UNIX_ONLY_TEST(SkParagraph_LongWordParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_LongWordParagraph.png");
     const char* text =
             "A "
@@ -3777,7 +3960,7 @@ UNIX_ONLY_TEST(SkParagraph_LongWordParagraph, reporter) {
 // Checked: DIFF?
 UNIX_ONLY_TEST(SkParagraph_KernScaleParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_KernScaleParagraph.png");
 
     const char* text1 = "AVAVAWAH A0 V0 VA To The Lo";
@@ -3823,7 +4006,7 @@ UNIX_ONLY_TEST(SkParagraph_KernScaleParagraph, reporter) {
 // Checked: DIFF+
 UNIX_ONLY_TEST(SkParagraph_NewlineParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_NewlineParagraph.png");
     const char* text =
             "line1\nline2 test1 test2 test3 test4 test5 test6 test7\nline3\n\nline4 "
@@ -3864,7 +4047,7 @@ UNIX_ONLY_TEST(SkParagraph_NewlineParagraph, reporter) {
 // TODO: Fix underline
 UNIX_ONLY_TEST(SkParagraph_EmojiParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_EmojiParagraph.png");
   const char* text =
       "😀😃😄😁😆😅😂🤣☺😇🙂😍😡😟😢😻👽💩👍👎🙏👌👋👄👁👦👼👨‍🚀👨‍🚒🙋‍♂️👳👨‍👨‍👧‍👧\
@@ -3908,7 +4091,7 @@ UNIX_ONLY_TEST(SkParagraph_EmojiParagraph, reporter) {
 // Checked: DIFF+
 UNIX_ONLY_TEST(SkParagraph_EmojiMultiLineRectsParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_EmojiMultiLineRectsParagraph.png");
   const char* text =
       "👩‍👩‍👦👩‍👩‍👧‍👧🇺🇸👩‍👩‍👦👩‍👩‍👧‍👧i🇺🇸👩‍👩‍👦👩‍👩‍👧‍👧🇺🇸👩‍👩‍👦👩‍👩‍👧‍👧🇺🇸"
@@ -3969,7 +4152,7 @@ UNIX_ONLY_TEST(SkParagraph_EmojiMultiLineRectsParagraph, reporter) {
 // Checked: DIFF (line breaking)
 UNIX_ONLY_TEST(SkParagraph_RepeatLayoutParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_RepeatLayoutParagraph.png");
     const char* text =
             "Sentence to layout at diff widths to get diff line counts. short words "
@@ -4009,7 +4192,7 @@ UNIX_ONLY_TEST(SkParagraph_RepeatLayoutParagraph, reporter) {
 // Checked: NO DIFF
 UNIX_ONLY_TEST(SkParagraph_Ellipsize, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_Ellipsize.png");
     const char* text =
             "This is a very long sentence to test if the text will properly wrap "
@@ -4049,7 +4232,7 @@ UNIX_ONLY_TEST(SkParagraph_Ellipsize, reporter) {
 // Checked: NO DIFF
 UNIX_ONLY_TEST(SkParagraph_UnderlineShiftParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_UnderlineShiftParagraph.png");
     const char* text1 = "fluttser ";
     const char* text2 = "mdje";
@@ -4118,7 +4301,7 @@ UNIX_ONLY_TEST(SkParagraph_UnderlineShiftParagraph, reporter) {
 // Checked: NO DIFF
 UNIX_ONLY_TEST(SkParagraph_SimpleShadow, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_SimpleShadow.png");
     const char* text = "Hello World Text Dialog";
     const size_t len = strlen(text);
@@ -4156,7 +4339,7 @@ UNIX_ONLY_TEST(SkParagraph_SimpleShadow, reporter) {
 // Checked: NO DIFF
 UNIX_ONLY_TEST(SkParagraph_ComplexShadow, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_ComplexShadow.png");
     const char* text = "Text Chunk ";
     const size_t len = strlen(text);
@@ -4226,7 +4409,7 @@ UNIX_ONLY_TEST(SkParagraph_ComplexShadow, reporter) {
 // Checked: NO DIFF
 UNIX_ONLY_TEST(SkParagraph_BaselineParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_BaselineParagraph.png");
     const char* text =
             "左線読設Byg後碁給能上目秘使約。満毎冠行来昼本可必図将発確年。今属場育"
@@ -4273,7 +4456,7 @@ UNIX_ONLY_TEST(SkParagraph_BaselineParagraph, reporter) {
 // Checked: NO DIFF (number of runs only)
 UNIX_ONLY_TEST(SkParagraph_FontFallbackParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_FontFallbackParagraph.png");
 
     const char* text1 = "Roboto 字典 ";         // Roboto + unresolved
@@ -4363,7 +4546,7 @@ UNIX_ONLY_TEST(SkParagraph_FontFallbackParagraph, reporter) {
 // Checked: NO DIFF
 UNIX_ONLY_TEST(SkParagraph_StrutParagraph1, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_StrutParagraph1.png");
     // The chinese extra height should be absorbed by the strut.
     const char* text = "01234満毎冠p来É本可\nabcd\n満毎É行p昼本可";
@@ -4468,7 +4651,7 @@ UNIX_ONLY_TEST(SkParagraph_StrutParagraph1, reporter) {
 // Checked: NO DIFF
 UNIX_ONLY_TEST(SkParagraph_StrutParagraph2, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_StrutParagraph2.png");
     // The chinese extra height should be absorbed by the strut.
     const char* text = "01234ABCDEFGH\nabcd\nABCDEFGH";
@@ -4575,7 +4758,7 @@ UNIX_ONLY_TEST(SkParagraph_StrutParagraph2, reporter) {
 // Checked: NO DIFF
 UNIX_ONLY_TEST(SkParagraph_StrutParagraph3, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_StrutParagraph3.png");
 
     // The chinese extra height should be absorbed by the strut.
@@ -4683,7 +4866,7 @@ UNIX_ONLY_TEST(SkParagraph_StrutParagraph3, reporter) {
 // Checked: NO DIFF
 UNIX_ONLY_TEST(SkParagraph_StrutForceParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_StrutForceParagraph.png");
     const char* text = "01234満毎冠行来昼本可\nabcd\n満毎冠行来昼本可";
     const size_t len = strlen(text);
@@ -4782,7 +4965,7 @@ UNIX_ONLY_TEST(SkParagraph_StrutForceParagraph, reporter) {
 // Checked: NO DIFF
 UNIX_ONLY_TEST(SkParagraph_StrutDefaultParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_StrutDefaultParagraph.png");
 
     const char* text = "01234満毎冠行来昼本可\nabcd\n満毎冠行来昼本可";
@@ -4845,7 +5028,8 @@ UNIX_ONLY_TEST(SkParagraph_StrutDefaultParagraph, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_FontFeaturesParagraph, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+
     TestCanvas canvas("SkParagraph_FontFeaturesParagraph.png");
 
     const char* text = "12ab\n";
@@ -4896,7 +5080,7 @@ UNIX_ONLY_TEST(SkParagraph_FontFeaturesParagraph, reporter) {
 // Not in Minikin
 UNIX_ONLY_TEST(SkParagraph_WhitespacesInMultipleFonts, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     const char* text = "English English 字典 字典 😀😃😄 😀😃😄";
     const size_t len = strlen(text);
 
@@ -4928,7 +5112,7 @@ UNIX_ONLY_TEST(SkParagraph_WhitespacesInMultipleFonts, reporter) {
 // Disable until I sort out fonts
 DEF_TEST_DISABLED(SkParagraph_JSON1, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     const char* text = "👨‍👩‍👧‍👦";
     const size_t len = strlen(text);
 
@@ -4967,7 +5151,7 @@ DEF_TEST_DISABLED(SkParagraph_JSON1, reporter) {
 // Disable until I sort out fonts
 DEF_TEST_DISABLED(SkParagraph_JSON2, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     const char* text = "p〠q";
     const size_t len = strlen(text);
 
@@ -5012,7 +5196,7 @@ UNIX_ONLY_TEST(SkParagraph_CacheText, reporter) {
     ParagraphCache cache;
     cache.turnOn(true);
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     ParagraphStyle paragraph_style;
     paragraph_style.turnHintingOff();
@@ -5047,7 +5231,7 @@ UNIX_ONLY_TEST(SkParagraph_CacheFonts, reporter) {
     ParagraphCache cache;
     cache.turnOn(true);
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     ParagraphStyle paragraph_style;
     paragraph_style.turnHintingOff();
@@ -5087,7 +5271,7 @@ UNIX_ONLY_TEST(SkParagraph_CacheFontRanges, reporter) {
     ParagraphCache cache;
     cache.turnOn(true);
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     ParagraphStyle paragraph_style;
     paragraph_style.turnHintingOff();
@@ -5132,7 +5316,7 @@ UNIX_ONLY_TEST(SkParagraph_CacheStyles, reporter) {
     ParagraphCache cache;
     cache.turnOn(true);
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     ParagraphStyle paragraph_style;
     paragraph_style.turnHintingOff();
@@ -5170,8 +5354,8 @@ UNIX_ONLY_TEST(SkParagraph_CacheStyles, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_ParagraphWithLineBreak, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
-    fontCollection->setDefaultFontManager(SkFontMgr::RefDefault());
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    fontCollection->setDefaultFontManager(ToolUtils::TestFontMgr());
     fontCollection->enableFontFallback();
 
     TestCanvas canvas("SkParagraph_ParagraphWithLineBreak.png");
@@ -5199,8 +5383,8 @@ UNIX_ONLY_TEST(SkParagraph_ParagraphWithLineBreak, reporter) {
 // This test does not produce an image
 UNIX_ONLY_TEST(SkParagraph_NullInMiddleOfText, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
-    fontCollection->setDefaultFontManager(SkFontMgr::RefDefault());
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    fontCollection->setDefaultFontManager(ToolUtils::TestFontMgr());
 
     const SkString text("null terminator ->\u0000<- on purpose did you see it?");
 
@@ -5220,7 +5404,7 @@ UNIX_ONLY_TEST(SkParagraph_NullInMiddleOfText, reporter) {
 // This test does not produce an image
 UNIX_ONLY_TEST(SkParagraph_PlaceholderOnly, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     ParagraphStyle paragraph_style;
     TextStyle text_style;
@@ -5239,8 +5423,8 @@ UNIX_ONLY_TEST(SkParagraph_PlaceholderOnly, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_Fallbacks, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
-    fontCollection->setDefaultFontManager(SkFontMgr::RefDefault(), "Arial");
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    fontCollection->setDefaultFontManager(ToolUtils::TestFontMgr(), "Arial");
     fontCollection->enableFontFallback();
     TestCanvas canvas("SkParagraph_Fallbacks.png");
 
@@ -5283,8 +5467,8 @@ UNIX_ONLY_TEST(SkParagraph_Fallbacks, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_Bidi1, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
-    fontCollection->setDefaultFontManager(SkFontMgr::RefDefault());
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    fontCollection->setDefaultFontManager(ToolUtils::TestFontMgr());
     fontCollection->enableFontFallback();
     TestCanvas canvas("SkParagraph_Bidi1.png");
 
@@ -5335,8 +5519,8 @@ UNIX_ONLY_TEST(SkParagraph_Bidi1, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_Bidi2, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
-    fontCollection->setDefaultFontManager(SkFontMgr::RefDefault());
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    fontCollection->setDefaultFontManager(ToolUtils::TestFontMgr());
     fontCollection->enableFontFallback();
     TestCanvas canvas("SkParagraph_Bidi2.png");
 
@@ -5377,8 +5561,8 @@ UNIX_ONLY_TEST(SkParagraph_Bidi2, reporter) {
 // This test does not produce an image
 UNIX_ONLY_TEST(SkParagraph_NewlineOnly, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
-    fontCollection->setDefaultFontManager(SkFontMgr::RefDefault());
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    fontCollection->setDefaultFontManager(ToolUtils::TestFontMgr());
 
     TextStyle text_style;
     text_style.setFontFamilies({SkString("Ahem")});
@@ -5400,15 +5584,18 @@ UNIX_ONLY_TEST(SkParagraph_FontResolutions, reporter) {
 
     sk_sp<TestFontCollection> fontCollection =
             sk_make_sp<TestFontCollection>(GetResourcePath("fonts").c_str(), false);
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     if (!fontCollection->addFontFromFile("abc/abc.ttf", "abc")) {
+        ERRORF(reporter, "abc/abc.ttf not found");
         return;
     }
     if (!fontCollection->addFontFromFile("abc/abc+grave.ttf", "abc+grave")) {
+        ERRORF(reporter, "abc/abc+grave.ttf not found");
         return;
     }
     if (!fontCollection->addFontFromFile("abc/abc+agrave.ttf", "abc+agrave")) {
+        ERRORF(reporter, "abc/abc+agrave.ttf not found");
         return;
     }
 
@@ -5456,7 +5643,7 @@ UNIX_ONLY_TEST(SkParagraph_FontStyle, reporter) {
     TestCanvas canvas("SkParagraph_FontStyle.png");
 
     sk_sp<TestFontCollection> fontCollection = sk_make_sp<TestFontCollection>(GetResourcePath("fonts").c_str(), false, true);
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TextStyle text_style;
     text_style.setFontFamilies({SkString("Roboto")});
@@ -5495,7 +5682,7 @@ UNIX_ONLY_TEST(SkParagraph_Shaping, reporter) {
 
     sk_sp<TestFontCollection> fontCollection =
          sk_make_sp<TestFontCollection>(GetResourcePath("fonts").c_str(), true);
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TextStyle text_style;
     text_style.setFontFamilies({SkString("Roboto")});
@@ -5518,8 +5705,8 @@ UNIX_ONLY_TEST(SkParagraph_Shaping, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_Ellipsis, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
-    fontCollection->setDefaultFontManager(SkFontMgr::RefDefault());
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    fontCollection->setDefaultFontManager(ToolUtils::TestFontMgr());
     TestCanvas canvas("SkParagraph_Ellipsis.png");
 
     const char* text = "This\n"
@@ -5579,8 +5766,8 @@ UNIX_ONLY_TEST(SkParagraph_Ellipsis, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_MemoryLeak, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
-    fontCollection->setDefaultFontManager(SkFontMgr::RefDefault());
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    fontCollection->setDefaultFontManager(ToolUtils::TestFontMgr());
 
     std::string text;
     for (size_t i = 0; i < 10; i++)
@@ -5610,8 +5797,8 @@ UNIX_ONLY_TEST(SkParagraph_MemoryLeak, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_FormattingInfinity, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
-    fontCollection->setDefaultFontManager(SkFontMgr::RefDefault());
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    fontCollection->setDefaultFontManager(ToolUtils::TestFontMgr());
     TestCanvas canvas("SkParagraph_FormattingInfinity.png");
 
     const char* text = "Some text\nAnother line";
@@ -5665,7 +5852,7 @@ UNIX_ONLY_TEST(SkParagraph_Infinity, reporter) {
 UNIX_ONLY_TEST(SkParagraph_LineMetrics, reporter) {
 
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_LineMetrics.png");
 
@@ -5746,7 +5933,7 @@ DEF_TEST_DISABLED(SkParagraph_PlaceholderHeightInf, reporter) {
     TestCanvas canvas("SkParagraph_PlaceholderHeightInf.png");
 
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TextStyle text_style;
     text_style.setFontFamilies({SkString("Ahem")});
@@ -5778,7 +5965,7 @@ DEF_TEST_DISABLED(SkParagraph_PlaceholderHeightInf, reporter) {
 UNIX_ONLY_TEST(SkParagraph_LineMetricsTextAlign, reporter) {
 
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_LineMetricsTextAlign.png");
 
@@ -5822,7 +6009,7 @@ UNIX_ONLY_TEST(SkParagraph_LineMetricsTextAlign, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_FontResolutionInRTL, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>(true);
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_FontResolutionInRTL.png");
     const char* text = " אאא בּבּבּבּ אאאא בּבּ אאא בּבּבּ אאאאא בּבּבּבּ אאאא בּבּבּבּבּ ";
     const size_t len = strlen(text);
@@ -5852,7 +6039,7 @@ UNIX_ONLY_TEST(SkParagraph_FontResolutionInRTL, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_FontResolutionInLTR, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>(true);
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_FontResolutionInLTR.png");
     auto text = u"abc \u01A2 \u01A2 def";
 
@@ -5884,7 +6071,7 @@ UNIX_ONLY_TEST(SkParagraph_FontResolutionInLTR, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_Intrinsic, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     SkString text(std::string(3000, 'a'));
 
     ParagraphStyle paragraph_style;
@@ -5910,7 +6097,7 @@ UNIX_ONLY_TEST(SkParagraph_NoCache1, reporter) {
     cache.turnOn(true);
 
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>(true);
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     // Long arabic text with english spaces
     const char* text =
             "من أسر وإعلان الخاصّة وهولندا،, عل قائمة الضغوط بالمطالبة تلك. الصفحة "
@@ -5970,7 +6157,7 @@ UNIX_ONLY_TEST(SkParagraph_NoCache1, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_HeightCalculations, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_HeightCalculations.png");
 
@@ -6003,7 +6190,7 @@ UNIX_ONLY_TEST(SkParagraph_HeightCalculations, reporter) {
 UNIX_ONLY_TEST(SkParagraph_RTL_With_Styles, reporter) {
 
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_RTL_With_Styles.png");
 
@@ -6043,7 +6230,7 @@ UNIX_ONLY_TEST(SkParagraph_RTL_With_Styles, reporter) {
 UNIX_ONLY_TEST(SkParagraph_PositionInsideEmoji, reporter) {
 
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_PositionInsideEmoji.png");
 
@@ -6097,7 +6284,7 @@ UNIX_ONLY_TEST(SkParagraph_PositionInsideEmoji, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_SingleLineHeight1, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_SingleLineHeight1.png");
 
@@ -6126,7 +6313,7 @@ UNIX_ONLY_TEST(SkParagraph_SingleLineHeight1, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_SingleLineHeight2, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_SingleLineHeight2.png");
 
@@ -6155,7 +6342,7 @@ UNIX_ONLY_TEST(SkParagraph_SingleLineHeight2, reporter) {
 UNIX_ONLY_TEST(SkParagraph_PlaceholderWidth, reporter) {
 
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_PlaceholderWidth.png");
 
@@ -6199,7 +6386,7 @@ UNIX_ONLY_TEST(SkParagraph_PlaceholderWidth, reporter) {
 UNIX_ONLY_TEST(SkParagraph_GlyphPositionsInEmptyLines, reporter) {
 
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_GlyphPositionsInEmptyLines.png");
     ParagraphStyle paragraph_style;
@@ -6231,7 +6418,7 @@ UNIX_ONLY_TEST(SkParagraph_GlyphPositionsInEmptyLines, reporter) {
 UNIX_ONLY_TEST(SkParagraph_RTLGlyphPositions, reporter) {
 
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_RTLGlyphPositions.png");
     ParagraphStyle paragraph_style;
@@ -6271,7 +6458,7 @@ UNIX_ONLY_TEST(SkParagraph_RTLGlyphPositions, reporter) {
 UNIX_ONLY_TEST(SkParagraph_RTLGlyphPositionsInEmptyLines, reporter) {
 
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_RTLGlyphPositionsInEmptyLines.png");
 
@@ -6302,7 +6489,7 @@ UNIX_ONLY_TEST(SkParagraph_RTLGlyphPositionsInEmptyLines, reporter) {
 UNIX_ONLY_TEST(SkParagraph_LTRGlyphPositionsForTrailingSpaces, reporter) {
 
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_LTRGlyphPositionsForTrailingSpaces.png");
 
@@ -6343,7 +6530,7 @@ UNIX_ONLY_TEST(SkParagraph_LTRGlyphPositionsForTrailingSpaces, reporter) {
 UNIX_ONLY_TEST(SkParagraph_RTLGlyphPositionsForTrailingSpaces, reporter) {
 
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_RTLGlyphPositionsForTrailingSpaces.png");
 
@@ -6400,7 +6587,7 @@ UNIX_ONLY_TEST(SkParagraph_RTLGlyphPositionsForTrailingSpaces, reporter) {
 UNIX_ONLY_TEST(SkParagraph_LTRLineMetricsDoesNotIncludeNewLine, reporter) {
 
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_LTRLineMetricsDoesNotIncludeNewLine.png");
 
@@ -6442,7 +6629,7 @@ UNIX_ONLY_TEST(SkParagraph_LTRLineMetricsDoesNotIncludeNewLine, reporter) {
 UNIX_ONLY_TEST(SkParagraph_RTLLineMetricsDoesNotIncludeNewLine, reporter) {
 
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_RTLLineMetricsDoesNotIncludeNewLine.png");
     canvas.get()->translate(100, 100);
@@ -6516,7 +6703,7 @@ UNIX_ONLY_TEST(SkParagraph_RTLLineMetricsDoesNotIncludeNewLine, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_PlaceholderPosition, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_PlaceholderPosition.png");
     canvas.get()->translate(100, 100);
@@ -6548,7 +6735,7 @@ UNIX_ONLY_TEST(SkParagraph_PlaceholderPosition, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_LineEnd, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_LineEnd.png");
     canvas.get()->translate(100, 100);
@@ -6586,7 +6773,7 @@ UNIX_ONLY_TEST(SkParagraph_LineEnd, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_Utf16Indexes, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_Utf16Indexes.png");
     canvas.get()->translate(100, 100);
@@ -6614,7 +6801,7 @@ UNIX_ONLY_TEST(SkParagraph_Utf16Indexes, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_RTLFollowedByLTR, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_RTLFollowedByLTR.png");
     canvas.get()->translate(100, 100);
@@ -6671,7 +6858,7 @@ UNIX_ONLY_TEST(SkParagraph_RTLFollowedByLTR, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_StrutTopLine, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_StrutTopLine.png");
 
@@ -6719,7 +6906,7 @@ UNIX_ONLY_TEST(SkParagraph_StrutTopLine, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_DifferentFontsTopLine, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_DifferentFontsTopLine.png");
 
@@ -6765,7 +6952,7 @@ UNIX_ONLY_TEST(SkParagraph_DifferentFontsTopLine, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_SimpleParagraphReset, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     const char* text = "Hello World Text Dialog";
     const size_t len = strlen(text);
 
@@ -6808,7 +6995,7 @@ UNIX_ONLY_TEST(SkParagraph_SimpleParagraphReset, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_EllipsisGetRectForRange, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_EllipsisGetRectForRange.png");
     const char* text =
             "This is a very long sentence to test if the text will properly wrap "
@@ -6853,7 +7040,7 @@ UNIX_ONLY_TEST(SkParagraph_EllipsisGetRectForRange, reporter) {
 // This test does not produce an image
 UNIX_ONLY_TEST(SkParagraph_StrutAndTextBehavior, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     const char* text = "";
     const size_t len = strlen(text);
 
@@ -6892,9 +7079,8 @@ UNIX_ONLY_TEST(SkParagraph_StrutAndTextBehavior, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_NonMonotonicGlyphsLTR, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
-    fontCollection->setDefaultFontManager(SkFontMgr::RefDefault());
-    fontCollection->enableFontFallback();
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    NEED_SYSTEM_FONTS(fontCollection)
 
     TestCanvas canvas("SkParagraph_NonMonotonicGlyphsLTR.png");
     std::u16string text =
@@ -6945,9 +7131,8 @@ UNIX_ONLY_TEST(SkParagraph_NonMonotonicGlyphsLTR, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_NonMonotonicGlyphsRTL, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
-    fontCollection->setDefaultFontManager(SkFontMgr::RefDefault());
-    fontCollection->enableFontFallback();
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    NEED_SYSTEM_FONTS(fontCollection)
 
     TestCanvas canvas("SkParagraph_NonMonotonicGlyphsRTL.png");
     const char* text = "ٱلْرَّحْمَـانُ";
@@ -6985,10 +7170,8 @@ UNIX_ONLY_TEST(SkParagraph_NonMonotonicGlyphsRTL, reporter) {
 
 void performGetRectsForRangeConcurrently(skiatest::Reporter* reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) {
-        INFOF(reporter, "No fonts found\n");
-        return;
-    }
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+
     auto const text = std::u16string(42000, 'x');
     ParagraphStyle paragraphStyle;
     TextStyle textStyle;
@@ -7033,7 +7216,7 @@ UNIX_ONLY_TEST(SkParagraph_GetRectsForRangeConcurrently, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_TabSubstitution, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>(true);
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_TabSubstitution.png");
 
@@ -7067,10 +7250,10 @@ UNIX_ONLY_TEST(SkParagraph_TabSubstitution, reporter) {
     REPORTER_ASSERT(reporter, 2 == fontCollection->getParagraphCache()->count());
 }
 
-DEF_TEST(SkParagraph_lineMetricsWithEllipsis, reporter) {
+UNIX_ONLY_TEST(SkParagraph_lineMetricsWithEllipsis, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
-    fontCollection->setDefaultFontManager(SkFontMgr::RefDefault());
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    fontCollection->setDefaultFontManager(ToolUtils::TestFontMgr());
     fontCollection->enableFontFallback();
 
     ParagraphStyle paragraph_style;
@@ -7089,10 +7272,10 @@ DEF_TEST(SkParagraph_lineMetricsWithEllipsis, reporter) {
     REPORTER_ASSERT(reporter, lm.size() == 1);
 }
 
-DEF_TEST(SkParagraph_lineMetricsAfterUpdate, reporter) {
+UNIX_ONLY_TEST(SkParagraph_lineMetricsAfterUpdate, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
-    fontCollection->setDefaultFontManager(SkFontMgr::RefDefault());
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    fontCollection->setDefaultFontManager(ToolUtils::TestFontMgr());
     fontCollection->enableFontFallback();
 
     auto text = std::u16string(u"hello world");
@@ -7118,7 +7301,7 @@ DEF_TEST(SkParagraph_lineMetricsAfterUpdate, reporter) {
 // Google logo is shown in one style (the first one)
 UNIX_ONLY_TEST(SkParagraph_MultiStyle_Logo, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>(true);
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_MultiStyle_Logo.png");
 
@@ -7235,7 +7418,7 @@ UNIX_ONLY_TEST(SkParagraph_MultiStyle_Logo, reporter) {
 // Ligature FFI should allow painting and querying by codepoints
 UNIX_ONLY_TEST(SkParagraph_MultiStyle_FFI, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>(true);
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_MultiStyle_FFI.png");
 
@@ -7297,7 +7480,7 @@ UNIX_ONLY_TEST(SkParagraph_MultiStyle_FFI, reporter) {
 // Multiple code points/single glyph emoji family should be treated as a single glyph
 UNIX_ONLY_TEST(SkParagraph_MultiStyle_EmojiFamily, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>(true);
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_MultiStyle_EmojiFamily.png");
 
@@ -7351,7 +7534,7 @@ UNIX_ONLY_TEST(SkParagraph_MultiStyle_EmojiFamily, reporter) {
 // Arabic Ligature case should be painted into multi styles but queried as a single glyph
 UNIX_ONLY_TEST(SkParagraph_MultiStyle_Arabic, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>(true);
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_MultiStyle_Arabic.png");
 
@@ -7403,9 +7586,8 @@ UNIX_ONLY_TEST(SkParagraph_MultiStyle_Arabic, reporter) {
 // Zalgo text should be painted into multi styles but queried as a single glyph
 UNIX_ONLY_TEST(SkParagraph_MultiStyle_Zalgo, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
-    fontCollection->setDefaultFontManager(SkFontMgr::RefDefault());
-    fontCollection->enableFontFallback();
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    NEED_SYSTEM_FONTS(fontCollection)
 
     TestCanvas canvas("SkParagraph_MultiStyle_Zalgo.png");
 
@@ -7467,7 +7649,7 @@ UNIX_ONLY_TEST(SkParagraph_MultiStyle_Zalgo, reporter) {
 // RTL Ellipsis
 UNIX_ONLY_TEST(SkParagraph_RtlEllipsis1, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>(true);
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_RtlEllipsis1.png");
 
@@ -7504,7 +7686,7 @@ UNIX_ONLY_TEST(SkParagraph_RtlEllipsis1, reporter) {
 
 UNIX_ONLY_TEST(SkParagraph_RtlEllipsis2, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>(true);
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
 
     TestCanvas canvas("SkParagraph_RtlEllipsis2.png");
 
@@ -7539,9 +7721,17 @@ UNIX_ONLY_TEST(SkParagraph_RtlEllipsis2, reporter) {
         });
 };
 
+static bool has_empty_typeface(SkFont f) {
+    SkTypeface* face = f.getTypeface();
+    if (!face) {
+        return true; // Should be impossible, but just in case...
+    }
+    return face->countGlyphs() == 0 && face->getBounds().isEmpty();
+}
+
 UNIX_ONLY_TEST(SkParagraph_TextEditingFunctionality, reporter) {
     sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
-    if (!fontCollection->fontsFound()) return;
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
     TestCanvas canvas("SkParagraph_TextEditingFunctionality.png");
     const char* text =
             "This is a very long sentence to test if the text will properly wrap "
@@ -7574,6 +7764,8 @@ UNIX_ONLY_TEST(SkParagraph_TextEditingFunctionality, reporter) {
     lineNumber = paragraph->getLineNumberAt(len / 2);
     REPORTER_ASSERT(reporter, lineNumber == 1);
     lineNumber = paragraph->getLineNumberAt(len - 1);
+    REPORTER_ASSERT(reporter, lineNumber == -1);
+    lineNumber = paragraph->getLineNumberAt(len);
     REPORTER_ASSERT(reporter, lineNumber == -1);
     lineNumber = paragraph->getLineNumberAt(len + 10);
     REPORTER_ASSERT(reporter, lineNumber == -1);
@@ -7612,11 +7804,12 @@ UNIX_ONLY_TEST(SkParagraph_TextEditingFunctionality, reporter) {
     REPORTER_ASSERT(reporter, foundClosest && glyphInfo.fClusterTextRange.start == 61 &&
                                               glyphInfo.fClusterTextRange.end == 62);
     foundClosest = paragraph->getClosestGlyphClusterAt(TestCanvasWidth + 10, 30, &glyphInfo);
-    REPORTER_ASSERT(reporter, foundClosest && glyphInfo.fClusterTextRange.start == 230 &&
-                                              glyphInfo.fClusterTextRange.end == 231);
+
+    REPORTER_ASSERT(reporter, foundClosest && glyphInfo.fClusterTextRange.start == 228 &&
+                                              glyphInfo.fClusterTextRange.end == 229);
 
     auto font = paragraph->getFontAt(10);
-    REPORTER_ASSERT(reporter, font.getTypeface() != nullptr);
+    REPORTER_ASSERT(reporter, !has_empty_typeface(font));
     SkString fontFamily;
     font.getTypeface()->getFamilyName(&fontFamily);
     REPORTER_ASSERT(reporter, fontFamily.equals("Roboto"));
@@ -7624,7 +7817,374 @@ UNIX_ONLY_TEST(SkParagraph_TextEditingFunctionality, reporter) {
     auto fonts = paragraph->getFonts();
     REPORTER_ASSERT(reporter, fonts.size() == 1);
     REPORTER_ASSERT(reporter, fonts[0].fTextRange.start == 0 && fonts[0].fTextRange.end == len);
-    REPORTER_ASSERT(reporter, fonts[0].fFont.getTypeface() != nullptr);
+    REPORTER_ASSERT(reporter, !has_empty_typeface(fonts[0].fFont));
     font.getTypeface()->getFamilyName(&fontFamily);
     REPORTER_ASSERT(reporter, fontFamily.equals("Roboto"));
 }
+
+UNIX_ONLY_TEST(SkParagraph_getLineNumberAt_Ellipsis, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    fontCollection->setDefaultFontManager(ToolUtils::TestFontMgr());
+    TestCanvas canvas("SkParagraph_Ellipsis.png");
+
+    // The second line will be ellipsized. The 10th glyph ("0") will be replaced
+    // by U+2026.
+    const char* text = "This\n"          // [0, 5)
+                       "1234567890ABCD"; // [5, len)
+
+    const size_t len = strlen(text);
+
+    ParagraphStyle paragraph_style;
+    paragraph_style.setEllipsis(u"\u2026");
+    paragraph_style.setMaxLines(2);
+
+    TextStyle text_style;
+    text_style.setFontFamilies({SkString("Ahem")});
+    text_style.setColor(SK_ColorBLACK);
+    text_style.setFontSize(10);
+
+    ParagraphBuilderImpl builder(paragraph_style, fontCollection);
+    builder.pushStyle(text_style);
+    builder.addText(text, len);
+    builder.pop();
+    auto paragraph = builder.Build();
+
+    // Roughly 10 characters wide.
+    paragraph->layout(100);
+
+    REPORTER_ASSERT(reporter, paragraph->getLineNumberAt(0) == 0);
+    REPORTER_ASSERT(reporter, paragraph->getLineNumberAt(4) == 0);
+    REPORTER_ASSERT(reporter, paragraph->getLineNumberAt(5) == 1);
+    REPORTER_ASSERT(reporter, paragraph->getLineNumberAt(len) == -1);
+    REPORTER_ASSERT(reporter, paragraph->getLineNumberAt(len - 1) == -1);
+    // "0" should be ellipsized away so the call return -1 instead of 1.
+    REPORTER_ASSERT(reporter, paragraph->getLineNumberAt(14) == -1);
+}
+
+UNIX_ONLY_TEST(SkParagraph_API_USES_UTF16, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    // Each of these characters consists of 3 UTF-8 code points, or 1 UTF-16
+    // code point.
+    const char* text = "一丁丂七";
+    const size_t len = strlen(text);
+
+    ParagraphStyle paragraph_style;
+    ParagraphBuilderImpl builder(paragraph_style, fontCollection);
+    TextStyle text_style;
+    text_style.setFontFamilies({SkString("Roboto")});
+    text_style.setFontSize(20);
+    text_style.setColor(SK_ColorBLACK);
+    builder.pushStyle(text_style);
+    builder.addText(text, len);
+    builder.pop();
+
+    auto paragraph = builder.Build();
+    paragraph->layout(TestCanvasWidth);
+
+    REPORTER_ASSERT(reporter, !has_empty_typeface(paragraph->getFontAtUTF16Offset(0)));
+    REPORTER_ASSERT(reporter, has_empty_typeface(paragraph->getFontAtUTF16Offset(4)));
+
+    REPORTER_ASSERT(reporter, paragraph->getGlyphInfoAtUTF16Offset(0, nullptr));
+    REPORTER_ASSERT(reporter, !paragraph->getGlyphInfoAtUTF16Offset(4, nullptr));
+    // Verify the output also uses UTF-16
+    Paragraph::GlyphInfo glyphInfo;
+    REPORTER_ASSERT(reporter, paragraph->getGlyphInfoAtUTF16Offset(3, &glyphInfo));
+    REPORTER_ASSERT(reporter, glyphInfo.fGraphemeClusterTextRange.start == 3);
+    REPORTER_ASSERT(reporter, glyphInfo.fGraphemeClusterTextRange.end == 4);
+
+    REPORTER_ASSERT(reporter, paragraph->getLineNumberAtUTF16Offset(0) == 0);
+    REPORTER_ASSERT(reporter, paragraph->getLineNumberAtUTF16Offset(4) == -1);
+
+    // The last logical character ("七") is considered hit.
+    REPORTER_ASSERT(reporter, paragraph->getClosestUTF16GlyphInfoAt(999.0f, 999.0f, &glyphInfo));
+    REPORTER_ASSERT(reporter, glyphInfo.fGraphemeClusterTextRange.start == 3);
+    REPORTER_ASSERT(reporter, glyphInfo.fGraphemeClusterTextRange.end == 4);
+
+    // The first logical character ("一") is considered hit.
+    REPORTER_ASSERT(reporter, paragraph->getClosestUTF16GlyphInfoAt(-999.0f, 0.0f, &glyphInfo));
+    REPORTER_ASSERT(reporter, glyphInfo.fGraphemeClusterTextRange.start == 0);
+    REPORTER_ASSERT(reporter, glyphInfo.fGraphemeClusterTextRange.end == 1);
+}
+
+UNIX_ONLY_TEST(SkParagraph_Empty_Paragraph_Metrics, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    const char* text = "";
+
+    ParagraphStyle paragraph_style;
+    ParagraphBuilderImpl builder(paragraph_style, fontCollection);
+    TextStyle text_style;
+    text_style.setFontFamilies({SkString("Roboto")});
+    text_style.setFontSize(20);
+    text_style.setColor(SK_ColorBLACK);
+    builder.pushStyle(text_style);
+    builder.addText(text, 0);
+    builder.pop();
+
+    auto paragraph = builder.Build();
+    paragraph->layout(TestCanvasWidth);
+
+    REPORTER_ASSERT(reporter, has_empty_typeface(paragraph->getFontAt(0)));
+    REPORTER_ASSERT(reporter, !paragraph->getGlyphClusterAt(0, nullptr));
+    REPORTER_ASSERT(reporter, paragraph->getLineNumberAt(0) == -1);
+    REPORTER_ASSERT(reporter, !paragraph->getClosestGlyphClusterAt(10.0, 5.0, nullptr));
+}
+
+UNIX_ONLY_TEST(SkParagraph_GlyphCluster_Ligature, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    const char* text = "fi";
+    const size_t len = strlen(text);
+
+    ParagraphStyle paragraph_style;
+    ParagraphBuilderImpl builder(paragraph_style, fontCollection);
+    TextStyle text_style;
+    text_style.setFontFamilies({SkString("Roboto")});
+    text_style.setFontSize(20);
+    text_style.setColor(SK_ColorBLACK);
+    builder.pushStyle(text_style);
+    builder.addText(text, len);
+    builder.pop();
+
+    auto paragraph = builder.Build();
+    paragraph->layout(TestCanvasWidth);
+
+    Paragraph::GlyphClusterInfo glyphInfo;
+    REPORTER_ASSERT(reporter, paragraph->getGlyphClusterAt(0, &glyphInfo));
+    REPORTER_ASSERT(reporter, glyphInfo.fClusterTextRange.start == 0);
+    REPORTER_ASSERT(reporter, glyphInfo.fClusterTextRange.end == len);
+}
+
+UNIX_ONLY_TEST(SkParagraph_GlyphInfo_LigatureDiacritics, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    // Ligature + diacritics
+    // text = lam + hamza + alef + hamza
+    // lam and alef form a laam-alif ligature and the 2 hamza are diacritical
+    // marks the combines into the ligated base glyphs.
+    const char* text = "لٔأ";
+    const size_t len = strlen(text);
+
+    ParagraphStyle paragraph_style;
+    ParagraphBuilderImpl builder(paragraph_style, fontCollection);
+    TextStyle text_style;
+    text_style.setFontFamilies({SkString("Katibeh")});
+    text_style.setFontSize(100);
+    text_style.setColor(SK_ColorBLACK);
+    builder.pushStyle(text_style);
+    builder.addText(text, len);
+    builder.pop();
+
+    auto paragraph = builder.Build();
+    paragraph->layout(TestCanvasWidth);
+    TestCanvas canvas("SkParagraph_laam_alif_diacritics.png");
+    paragraph->paint(canvas.get(), 50, 50);
+
+    Paragraph::GlyphInfo glyphInfo;
+
+    const auto boxes = paragraph->getRectsForRange(0, len, RectHeightStyle::kTight, RectWidthStyle::kTight);
+    REPORTER_ASSERT(reporter, boxes.size() == 1);
+    const SkRect fullRect = boxes[0].rect;
+
+    REPORTER_ASSERT(reporter, paragraph->getGlyphInfoAtUTF16Offset(0, &glyphInfo));
+    REPORTER_ASSERT(reporter, glyphInfo.fGraphemeClusterTextRange.start == 0);
+    REPORTER_ASSERT(reporter, glyphInfo.fGraphemeClusterTextRange.end == 2);
+    const SkRect rect0 = glyphInfo.fGraphemeLayoutBounds;
+
+    REPORTER_ASSERT(reporter, paragraph->getGlyphInfoAtUTF16Offset(1, &glyphInfo));
+    REPORTER_ASSERT(reporter, glyphInfo.fGraphemeClusterTextRange.start == 0);
+    REPORTER_ASSERT(reporter, glyphInfo.fGraphemeClusterTextRange.end == 2);
+    const SkRect rect1 = glyphInfo.fGraphemeLayoutBounds;
+    REPORTER_ASSERT(reporter, rect0 == rect1);
+
+    REPORTER_ASSERT(reporter, paragraph->getGlyphInfoAtUTF16Offset(2, &glyphInfo));
+    REPORTER_ASSERT(reporter, glyphInfo.fGraphemeClusterTextRange.start == 2);
+    REPORTER_ASSERT(reporter, glyphInfo.fGraphemeClusterTextRange.end == 4);
+    const SkRect rect2 = glyphInfo.fGraphemeLayoutBounds;
+    // The latter half of the text forms a different grapheme.
+    REPORTER_ASSERT(reporter, rect2 != rect1);
+
+    REPORTER_ASSERT(reporter, paragraph->getGlyphInfoAtUTF16Offset(3, &glyphInfo));
+    REPORTER_ASSERT(reporter, glyphInfo.fGraphemeClusterTextRange.start == 2);
+    REPORTER_ASSERT(reporter, glyphInfo.fGraphemeClusterTextRange.end == 4);
+    const SkRect rect3 = glyphInfo.fGraphemeLayoutBounds;
+    REPORTER_ASSERT(reporter, rect2 == rect3);
+
+    // RTL text.
+    REPORTER_ASSERT(reporter, fullRect.left() == rect2.left());
+    REPORTER_ASSERT(reporter, fullRect.right() == rect0.right());
+
+    // Currently it seems the 2 grapheme rects do not overlap each other.
+    // REPORTER_ASSERT(reporter, rect2.right() < rect0.left());
+}
+
+UNIX_ONLY_TEST(SkParagraph_SingleDummyPlaceholder, reporter) {
+    sk_sp<ResourceFontCollection> fontCollection = sk_make_sp<ResourceFontCollection>();
+    SKIP_IF_FONTS_NOT_FOUND(reporter, fontCollection)
+    const char* text = "Single dummy placeholder";
+    const size_t len = strlen(text);
+
+    ParagraphStyle paragraph_style;
+    paragraph_style.turnHintingOff();
+    ParagraphBuilderImpl builder(paragraph_style, fontCollection);
+
+    TextStyle text_style;
+    text_style.setFontFamilies({SkString("Roboto")});
+    text_style.setColor(SK_ColorBLACK);
+    builder.pushStyle(text_style);
+    builder.addText(text, len);
+
+    auto paragraph = builder.Build();
+    paragraph->layout(TestCanvasWidth);
+
+    auto impl = static_cast<ParagraphImpl*>(paragraph.get());
+    REPORTER_ASSERT(reporter, impl->placeholders().size() == 1);
+
+    size_t index = 0;
+    for (auto& line : impl->lines()) {
+        line.scanStyles(StyleType::kDecorations,
+                        [&index, reporter]
+                        (TextRange textRange, const TextStyle& style, const TextLine::ClipContext& context) {
+                            REPORTER_ASSERT(reporter, index == 0);
+                            REPORTER_ASSERT(reporter, style.getColor() == SK_ColorBLACK);
+                            ++index;
+                        });
+    }
+}
+
+UNIX_ONLY_TEST(SkParagraph_EndWithLineSeparator, reporter) {
+    sk_sp<FontCollection> fontCollection = sk_make_sp<FontCollection>();
+    fontCollection->setDefaultFontManager(ToolUtils::TestFontMgr());
+    fontCollection->enableFontFallback();
+
+    const char* text = "A text ending with line separator.\u2028";
+    const size_t len = strlen(text);
+
+    ParagraphStyle paragraph_style;
+
+    ParagraphBuilderImpl builder(paragraph_style, fontCollection);
+    builder.addText(text, len);
+
+    auto paragraph = builder.Build();
+    paragraph->layout(SK_ScalarMax);
+
+    int visitedCount = 0;
+    paragraph->visit([&visitedCount, reporter](int lineNumber, const Paragraph::VisitorInfo* info) {
+        visitedCount++;
+        if (lineNumber == 1) {
+            // Visitor for second line created from line separator should only be called for 'end of line'.
+            // 'end of line' is denoted by 'info' being nullptr.
+            REPORTER_ASSERT(reporter, info == nullptr);
+        }
+    });
+    REPORTER_ASSERT(reporter, visitedCount == 3);
+}
+
+UNIX_ONLY_TEST(SkParagraph_EmojiFontResolution, reporter) {
+    auto fontCollection = sk_make_sp<FontCollection>();
+    fontCollection->setDefaultFontManager(ToolUtils::TestFontMgr(), std::vector<SkString>());
+    fontCollection->enableFontFallback();
+
+    const char* text = "♻️🏴󠁧󠁢󠁳󠁣󠁴󠁿";
+    const char* text1 = "♻️";
+    const size_t len = strlen(text);
+    const size_t len1 = strlen(text1);
+
+    ParagraphStyle paragraph_style;
+    ParagraphBuilderImpl builder(paragraph_style, fontCollection);
+    TextStyle text_style;
+    text_style.setFontFamilies({SkString("")});
+    builder.pushStyle(text_style);
+    builder.addText(text, len);
+    auto paragraph = builder.Build();
+    paragraph->layout(SK_ScalarMax);
+
+    auto impl = static_cast<ParagraphImpl*>(paragraph.get());
+
+    ParagraphBuilderImpl builder1(paragraph_style, fontCollection);
+    builder1.pushStyle(text_style);
+    builder1.addText(text1, len1);
+    auto paragraph1 = builder1.Build();
+    paragraph1->layout(SK_ScalarMax);
+
+    auto impl1 = static_cast<ParagraphImpl*>(paragraph1.get());
+    REPORTER_ASSERT(reporter, impl1->runs().size() == 1);
+    if (impl1->runs().size() == 1) {
+        SkString ff;
+        impl->run(0).font().getTypeface()->getFamilyName(&ff);
+        SkString ff1;
+        impl1->run(0).font().getTypeface()->getFamilyName(&ff1);
+        REPORTER_ASSERT(reporter, ff.equals(ff1));
+    }
+}
+
+#ifdef SK_UNICODE_ICU_IMPLEMENTATION
+UNIX_ONLY_TEST(SkParagraph_EmojiRuns, reporter) {
+
+    auto icu = SkUnicode::MakeIcuBasedUnicode();
+
+    auto test = [&](const char* text, SkUnichar expected) {
+        SkString str(text);
+        if ((false)) {
+            SkDebugf("'%s'\n", text);
+            const char* begin = str.data();
+            const char* end = str.data() + str.size();
+            while (begin != end) {
+                auto unicode = SkUTF::NextUTF8WithReplacement(&begin, end);
+                SkDebugf("  %d: %s %s\n", unicode,
+                         icu->isEmoji(unicode) ? "isEmoji" : "",
+                         icu->isEmojiComponent(unicode) ? "isEmojiComponent" : ""
+                         );
+            }
+
+            SkDebugf("Graphemes:");
+            skia_private::TArray<SkUnicode::CodeUnitFlags, true> codeUnitProperties;
+            icu->computeCodeUnitFlags(str.data(), str.size(), false, &codeUnitProperties);
+            int index = 0;
+            for (auto& cp : codeUnitProperties) {
+                if (SkUnicode::hasGraphemeStartFlag(cp)) {
+                    SkDebugf(" %d", index);
+                }
+                ++index;
+            }
+            SkDebugf("\n");
+        }
+
+        SkSpan<const char> textSpan(str.data(), str.size());
+        const char* begin = str.data();
+        const char* end = begin + str.size();
+        auto emojiStart = OneLineShaper::getEmojiSequenceStart(icu.get(), &begin, end);
+        REPORTER_ASSERT(reporter, expected == emojiStart);
+    };
+
+    test("", -1);
+    test("0", -1);
+    test("2nd", -1);
+    test("99", -1);
+    test("0️⃣", 48);
+    test("0️⃣12", 48);
+    test("#", -1);
+    test("#️⃣", 35);
+    test("#️⃣#", 35);
+    test("#️⃣#️⃣", 35);
+    test("*", -1);
+    test("*️⃣", 42);
+    test("*️⃣abc", 42);
+    test("*️⃣😊", 42);
+    test("😊", 128522);
+    test("😊abc", 128522);
+    test("😊*️⃣",128522);
+    test("👨‍👩‍👦‍👦", 128104);
+
+    // These 2 have emoji components as the first codepoint
+    test("🇷🇺", 127479); // Flag sequence
+    test("0️⃣", 48); // Keycap sequence
+
+    // These have a simple emoji as a first codepoint
+    test("🏴󠁧󠁢󠁥󠁮󠁧󠁿", 127988); // Tag sequence
+    test("👋🏼", 128075); // Modifier sequence
+    test("👨‍👩‍👧‍👦", 128104); // ZWJ sequence
+}
+#endif

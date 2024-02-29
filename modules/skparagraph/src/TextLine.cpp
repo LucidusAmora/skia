@@ -445,37 +445,63 @@ void TextLine::paintDecorations(ParagraphPainter* painter, SkScalar x, SkScalar 
 }
 
 void TextLine::justify(SkScalar maxWidth) {
-    // Count words and the extra spaces to spread across the line
-    // TODO: do it at the line breaking?..
-    size_t whitespacePatches = 0;
+    int whitespacePatches = 0;
     SkScalar textLen = 0;
+    SkScalar whitespaceLen = 0;
     bool whitespacePatch = false;
+    // Take leading whitespaces width but do not increment a whitespace patch number
+    bool leadingWhitespaces = false;
     this->iterateThroughClustersInGlyphsOrder(false, false,
-        [&whitespacePatches, &textLen, &whitespacePatch](const Cluster* cluster, bool ghost) {
+        [&](const Cluster* cluster, ClusterIndex index, bool ghost) {
             if (cluster->isWhitespaceBreak()) {
-                if (!whitespacePatch) {
-                    whitespacePatch = true;
+                if (index == 0) {
+                    leadingWhitespaces = true;
+                } else if (!whitespacePatch && !leadingWhitespaces) {
+                    // We only count patches BETWEEN words, not before
                     ++whitespacePatches;
                 }
+                whitespacePatch = !leadingWhitespaces;
+                whitespaceLen += cluster->width();
+            } else if (cluster->isIdeographic()) {
+                // Whitespace break before and after
+                if (!whitespacePatch && index != 0) {
+                    // We only count patches BETWEEN words, not before
+                    ++whitespacePatches; // before
+                }
+                whitespacePatch = true;
+                leadingWhitespaces = false;
+                ++whitespacePatches;    // after
             } else {
                 whitespacePatch = false;
+                leadingWhitespaces = false;
             }
             textLen += cluster->width();
             return true;
         });
 
+    if (whitespacePatch) {
+        // We only count patches BETWEEN words, not after
+        --whitespacePatches;
+    }
     if (whitespacePatches == 0) {
+        if (fOwner->paragraphStyle().getTextDirection() == TextDirection::kRtl) {
+            // Justify -> Right align
+            fShift = maxWidth - textLen;
+        }
         return;
     }
 
-    SkScalar step = (maxWidth - textLen) / whitespacePatches;
-    SkScalar shift = 0;
+    SkScalar step = (maxWidth - textLen + whitespaceLen) / whitespacePatches;
+    SkScalar shift = 0.0f;
+    SkScalar prevShift = 0.0f;
 
     // Deal with the ghost spaces
     auto ghostShift = maxWidth - this->fAdvance.fX;
     // Spread the extra whitespaces
     whitespacePatch = false;
-    this->iterateThroughClustersInGlyphsOrder(false, true, [&](const Cluster* cluster, bool ghost) {
+    // Do not break on leading whitespaces
+    leadingWhitespaces = false;
+    this->iterateThroughClustersInGlyphsOrder(false, true, [&](const Cluster* cluster, ClusterIndex index, bool ghost) {
 
         if (ghost) {
             if (cluster->run().leftToRight()) {
@@ -484,19 +510,41 @@ void TextLine::justify(SkScalar maxWidth) {
             return true;
         }
 
-        auto prevShift = shift;
         if (cluster->isWhitespaceBreak()) {
-            if (!whitespacePatch) {
+            if (index == 0) {
+                leadingWhitespaces = true;
+            } else if (!whitespacePatch && !leadingWhitespaces) {
                 shift += step;
                 whitespacePatch = true;
                 --whitespacePatches;
             }
+            shift -= cluster->width();
+        } else if (cluster->isIdeographic()) {
+            if (!whitespacePatch && index != 0) {
+                shift += step;
+               --whitespacePatches;
+            }
+            whitespacePatch = false;
+            leadingWhitespaces = false;
         } else {
             whitespacePatch = false;
+            leadingWhitespaces = false;
         }
-        shiftCluster(cluster, shift, prevShift);
+        this->shiftCluster(cluster, shift, prevShift);
+        prevShift = shift;
+        // We skip ideographic whitespaces
+        if (!cluster->isWhitespaceBreak() && cluster->isIdeographic()) {
+            shift += step;
+            whitespacePatch = true;
+            --whitespacePatches;
+        }
         return true;
     });
+
+    if (whitespacePatch && whitespacePatches < 0) {
+        whitespacePatches++;
+        shift -= step;
+    }
 
     SkAssertResult(nearlyEqual(shift, maxWidth - textLen));
     SkASSERT(whitespacePatches == 0);
@@ -580,11 +628,6 @@ void TextLine::createEllipsis(SkScalar maxWidth, const SkString& ellipsis, bool)
     }
 }
 
-static inline SkUnichar nextUtf8Unit(const char** ptr, const char* end) {
-    SkUnichar val = SkUTF::NextUTF8(ptr, end);
-    return val < 0 ? 0xFFFD : val;
-}
-
 std::unique_ptr<Run> TextLine::shapeEllipsis(const SkString& ellipsis, const Cluster* cluster) {
 
     class ShapeHandler final : public SkShaper::RunHandler {
@@ -635,16 +678,16 @@ std::unique_ptr<Run> TextLine::shapeEllipsis(const SkString& ellipsis, const Clu
         }
     }
 
-    auto shaped = [&](sk_sp<SkTypeface> typeface, bool fallback) -> std::unique_ptr<Run> {
+    auto shaped = [&](sk_sp<SkTypeface> typeface, sk_sp<SkFontMgr> fallback) -> std::unique_ptr<Run> {
         ShapeHandler handler(run.heightMultiplier(), run.useHalfLeading(), run.baselineShift(), ellipsis);
-        SkFont font(typeface, textStyle.getFontSize());
+        SkFont font(std::move(typeface), textStyle.getFontSize());
         font.setEdging(SkFont::Edging::kAntiAlias);
         font.setHinting(SkFontHinting::kSlight);
         font.setSubpixel(true);
 
         std::unique_ptr<SkShaper> shaper = SkShaper::MakeShapeDontWrapOrReorder(
                             fOwner->getUnicode()->copy(),
-                            fallback ? SkFontMgr::RefDefault() : SkFontMgr::RefEmpty());
+                            fallback ? fallback : SkFontMgr::RefEmpty());
         shaper->shape(ellipsis.c_str(),
                       ellipsis.size(),
                       font,
@@ -658,7 +701,7 @@ std::unique_ptr<Run> TextLine::shapeEllipsis(const SkString& ellipsis, const Clu
     };
 
     // Check the current font
-    auto ellipsisRun = shaped(run.fFont.refTypeface(), false);
+    auto ellipsisRun = shaped(run.fFont.refTypeface(), nullptr);
     if (ellipsisRun->isResolved()) {
         return ellipsisRun;
     }
@@ -667,7 +710,7 @@ std::unique_ptr<Run> TextLine::shapeEllipsis(const SkString& ellipsis, const Clu
     std::vector<sk_sp<SkTypeface>> typefaces = fOwner->fontCollection()->findTypefaces(
             textStyle.getFontFamilies(), textStyle.getFontStyle(), textStyle.getFontArguments());
     for (const auto& typeface : typefaces) {
-        ellipsisRun = shaped(typeface, false);
+        ellipsisRun = shaped(typeface, nullptr);
         if (ellipsisRun->isResolved()) {
             return ellipsisRun;
         }
@@ -676,12 +719,17 @@ std::unique_ptr<Run> TextLine::shapeEllipsis(const SkString& ellipsis, const Clu
     // Try the fallback
     if (fOwner->fontCollection()->fontFallbackEnabled()) {
         const char* ch = ellipsis.c_str();
-        SkUnichar unicode = nextUtf8Unit(&ch, ellipsis.c_str() + ellipsis.size());
-
-       auto typeface = fOwner->fontCollection()->defaultFallback(
-                    unicode, textStyle.getFontStyle(), textStyle.getLocale());
+      SkUnichar unicode = SkUTF::NextUTF8WithReplacement(&ch,
+                                                         ellipsis.c_str()
+                                                             + ellipsis.size());
+        // We do not expect emojis in ellipsis so if they appeat there
+        // they will not be resolved with the pretiest color emoji font
+        auto typeface = fOwner->fontCollection()->defaultFallback(
+                                            unicode,
+                                            textStyle.getFontStyle(),
+                                            textStyle.getLocale());
         if (typeface) {
-            ellipsisRun = shaped(typeface, true);
+            ellipsisRun = shaped(typeface, fOwner->fontCollection()->getFallbackManager());
             if (ellipsisRun->isResolved()) {
                 return ellipsisRun;
             }
@@ -841,6 +889,7 @@ void TextLine::iterateThroughClustersInGlyphsOrder(bool reversed,
     // Walk through the clusters in the logical order (or reverse)
     SkSpan<const size_t> runs(fRunsInVisualOrder.data(), fRunsInVisualOrder.size());
     bool ignore = false;
+    ClusterIndex index = 0;
     directional_for_each(runs, !reversed, [&](decltype(runs[0]) r) {
         if (ignore) return;
         auto run = this->fOwner->run(r);
@@ -856,7 +905,8 @@ void TextLine::iterateThroughClustersInGlyphsOrder(bool reversed,
             if (!includeGhosts && ghost) {
                 return;
             }
-            if (!visitor(&cluster, ghost)) {
+            if (!visitor(&cluster, index++, ghost)) {
+
                 ignore = true;
                 return;
             }
@@ -899,7 +949,8 @@ SkScalar TextLine::iterateThroughSingleRunByStyles(TextAdjustment textAdjustment
 
     if (styleType == StyleType::kNone) {
         ClipContext clipContext = correctContext(textRange, 0.0f);
-        if (clipContext.clip.height() > 0) {
+        // The placehoder can have height=0 or (exclusively) width=0 and still be a thing
+        if (clipContext.clip.height() > 0.0f || clipContext.clip.width() > 0.0f) {
             visitor(textRange, TextStyle(), clipContext);
             return clipContext.clip.width();
         } else {
@@ -1024,8 +1075,7 @@ void TextLine::iterateThroughVisualRuns(bool includingGhostSpaces, const RunVisi
     if (!includingGhostSpaces && compareRound(totalWidth, this->width(), fOwner->getApplyRoundingHack()) != 0) {
     // This is a very important assert!
     // It asserts that 2 different ways of calculation come with the same results
-        SkDebugf("ASSERT: %f != %f\n", totalWidth, this->width());
-        SkASSERT(false);
+        SkDEBUGFAILF("ASSERT: %f != %f\n", totalWidth, this->width());
     }
 }
 
@@ -1035,6 +1085,7 @@ SkVector TextLine::offset() const {
 
 LineMetrics TextLine::getMetrics() const {
     LineMetrics result;
+    SkASSERT(fOwner);
 
     // Fill out the metrics
     fOwner->ensureUTF16Mapping();

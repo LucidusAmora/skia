@@ -176,9 +176,9 @@ inline void blit_row_s32a_opaque(SkPMColor* dst, const SkPMColor* src, int len, 
     }
 }
 
-// Blend constant color over count src pixels, writing into dst.
+// Blend constant color over count dst pixels
 /*not static*/
-inline void blit_row_color32(SkPMColor* dst, const SkPMColor* src, int count, SkPMColor color) {
+inline void blit_row_color32(SkPMColor* dst, int count, SkPMColor color) {
     constexpr int N = 4;  // 8, 16 also reasonable choices
     using U32 = skvx::Vec<  N, uint32_t>;
     using U16 = skvx::Vec<4*N, uint16_t>;
@@ -191,21 +191,21 @@ inline void blit_row_color32(SkPMColor* dst, const SkPMColor* src, int count, Sk
 
         // (src * invA + (color << 8) + 128) >> 8
         // Should all fit in 16 bits.
-        U8 s = skvx::bit_pun<U8>(src),
+        U8 s = sk_bit_cast<U8>(src),
            a = U8(invA);
-        U16 c = skvx::cast<uint16_t>(skvx::bit_pun<U8>(U32(color))),
+        U16 c = skvx::cast<uint16_t>(sk_bit_cast<U8>(U32(color))),
             d = (mull(s,a) + (c << 8) + 128)>>8;
-        return skvx::bit_pun<U32>(skvx::cast<uint8_t>(d));
+        return sk_bit_cast<U32>(skvx::cast<uint8_t>(d));
     };
 
     while (count >= N) {
-        kernel(U32::Load(src)).store(dst);
-        src   += N;
+        kernel(U32::Load(dst)).store(dst);
         dst   += N;
         count -= N;
     }
     while (count --> 0) {
-        *dst++ = kernel(U32{*src++})[0];
+        *dst = kernel(U32{*dst})[0];
+        dst++;
     }
 }
 

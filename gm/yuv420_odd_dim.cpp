@@ -14,12 +14,14 @@
 #include "include/core/SkShader.h"
 #include "include/core/SkStream.h"
 #include "include/core/SkSurface.h"
+#include "include/core/SkTileMode.h"
 #include "include/encode/SkJpegEncoder.h"
 #include "include/gpu/GrRecordingContext.h"
 #include "include/gpu/ganesh/SkImageGanesh.h"
 #include "src/base/SkRandom.h"
 #include "src/core/SkCachedData.h"
 #include "src/image/SkImage_Base.h"
+#include "tools/DecodeUtils.h"
 #include "tools/Resources.h"
 #include "tools/gpu/YUVUtils.h"
 
@@ -95,7 +97,7 @@ DEF_SIMPLE_GM_CAN_FAIL(yuv420_odd_dim_repeat, canvas, errMsg,
         // This GM exists to exercise GPU planar images.
         return skiagm::DrawResult::kSkip;
     }
-    auto image = GetResourceAsImage("images/mandrill_256.png");
+    auto image = ToolUtils::GetResourceAsImage("images/mandrill_256.png");
     if (!image) {
         return rContext->abandoned() ? skiagm::DrawResult::kOk : skiagm::DrawResult::kFail;
     }
@@ -115,7 +117,7 @@ DEF_SIMPLE_GM_CAN_FAIL(yuv420_odd_dim_repeat, canvas, errMsg,
     auto yuvaPixmaps = SkYUVAPixmaps::FromExternalPixmaps(yuvaInfo, pixmaps);
     image = SkImages::TextureFromYUVAPixmaps(canvas->recordingContext(),
                                              yuvaPixmaps,
-                                             GrMipmapped::kYes,
+                                             skgpu::Mipmapped::kYes,
                                              /* limit to max tex size */ false,
                                              /* color space */ nullptr);
     if (!image) {

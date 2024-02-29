@@ -31,6 +31,7 @@
 #include "src/core/SkBlurMask.h"
 #include "tools/Resources.h"
 #include "tools/ToolUtils.h"
+#include "tools/fonts/FontToolUtils.h"
 
 #include <string.h>
 
@@ -45,7 +46,11 @@ protected:
         SkTextBlobBuilder builder;
 
         // make textblob.  To stress distance fields, we choose sizes appropriately
-        SkFont font(MakeResourceAsTypeface("fonts/HangingS.ttf"), 262);
+        sk_sp<SkTypeface> tf = ToolUtils::CreateTypefaceFromResource("fonts/HangingS.ttf");
+        if (!tf) {
+            tf = ToolUtils::DefaultPortableTypeface();
+        }
+        SkFont font(tf, 262);
         font.setSubpixel(true);
         font.setEdging(SkFont::Edging::kSubpixelAntiAlias);
 
@@ -93,14 +98,12 @@ protected:
         fBlob = builder.make();
     }
 
-    SkString onShortName() override {
+    SkString getName() const override {
         return SkStringPrintf("textblobmixedsizes%s",
                               fUseDFT ? "_df" : "");
     }
 
-    SkISize onISize() override {
-        return SkISize::Make(kWidth, kHeight);
-    }
+    SkISize getISize() override { return SkISize::Make(kWidth, kHeight); }
 
     void onDraw(SkCanvas* inputCanvas) override {
         SkCanvas* canvas = inputCanvas;
@@ -108,7 +111,7 @@ protected:
         if (fUseDFT) {
             // Create a new Canvas to enable DFT
             auto ctx = inputCanvas->recordingContext();
-            SkISize size = onISize();
+            SkISize size = getISize();
             sk_sp<SkColorSpace> colorSpace = inputCanvas->imageInfo().refColorSpace();
             SkImageInfo info = SkImageInfo::MakeN32(size.width(), size.height(),
                                                     kPremul_SkAlphaType, colorSpace);

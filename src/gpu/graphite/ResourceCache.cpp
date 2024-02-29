@@ -10,20 +10,28 @@
 #include "include/private/base/SingleOwner.h"
 #include "src/base/SkRandom.h"
 #include "src/core/SkTMultiMap.h"
+#include "src/core/SkTraceEvent.h"
 #include "src/gpu/graphite/GraphiteResourceKey.h"
 #include "src/gpu/graphite/ProxyCache.h"
 #include "src/gpu/graphite/Resource.h"
+
+#if defined(GRAPHITE_TEST_UTILS)
+#include "src/gpu/graphite/Texture.h"
+#endif
 
 namespace skgpu::graphite {
 
 #define ASSERT_SINGLE_OWNER SKGPU_ASSERT_SINGLE_OWNER(fSingleOwner)
 
-sk_sp<ResourceCache> ResourceCache::Make(SingleOwner* singleOwner, uint32_t recorderID) {
-    return sk_sp<ResourceCache>(new ResourceCache(singleOwner, recorderID));
+sk_sp<ResourceCache> ResourceCache::Make(SingleOwner* singleOwner,
+                                         uint32_t recorderID,
+                                         size_t maxBytes) {
+    return sk_sp<ResourceCache>(new ResourceCache(singleOwner, recorderID, maxBytes));
 }
 
-ResourceCache::ResourceCache(SingleOwner* singleOwner, uint32_t recorderID)
-        : fSingleOwner(singleOwner) {
+ResourceCache::ResourceCache(SingleOwner* singleOwner, uint32_t recorderID, size_t maxBytes)
+        : fMaxBytes(maxBytes)
+        , fSingleOwner(singleOwner) {
     if (recorderID != SK_InvalidGenID) {
         fProxyCache = std::make_unique<ProxyCache>(recorderID);
     }
@@ -48,6 +56,10 @@ void ResourceCache::shutdown() {
         SkAutoMutexExclusive locked(fReturnMutex);
         fIsShutdown = true;
     }
+    if (fProxyCache) {
+        fProxyCache->purgeAll();
+    }
+
     this->processReturnedResources();
 
     while (fNonpurgeableResources.size()) {
@@ -63,6 +75,8 @@ void ResourceCache::shutdown() {
         this->removeFromPurgeableQueue(top);
         top->unrefCache();
     }
+
+    TRACE_EVENT_INSTANT0("skia.gpu.cache", TRACE_FUNC, TRACE_EVENT_SCOPE_THREAD);
 }
 
 void ResourceCache::insertResource(Resource* resource) {
@@ -164,6 +178,19 @@ bool ResourceCache::returnResource(Resource* resource, LastRemovedRef removedRef
 
     SkASSERT(resource);
 
+    // When a non-shareable resource's CB and Usage refs are both zero, give it a chance prepare
+    // itself to be reused. On Dawn/WebGPU we use this to remap kXferCpuToGpu buffers asynchronously
+    // so that they are already mapped before they come out of the cache again.
+    if (resource->shouldDeleteASAP() == Resource::DeleteASAP::kNo &&
+        resource->key().shareable() == Shareable::kNo &&
+        removedRef == LastRemovedRef::kUsage) {
+        resource->prepareForReturnToCache([resource] { resource->initialUsageRef(); });
+        // Check if resource was re-ref'ed. In that case exit without adding to the queue.
+        if (resource->hasUsageRef()) {
+            return true;
+        }
+    }
+
     // We only allow one instance of a Resource to be in the return queue at a time. We do this so
     // that the ReturnQueue stays small and quick to process.
     //
@@ -185,6 +212,7 @@ bool ResourceCache::returnResource(Resource* resource, LastRemovedRef removedRef
         SkASSERT(nextResource.first != resource);
     }
 #endif
+
     fReturnQueue.push_back(std::make_pair(resource, removedRef));
     *resource->accessReturnIndex() = fReturnQueue.size() - 1;
     resource->refCache();
@@ -210,6 +238,14 @@ void ResourceCache::processReturnedResources() {
             *resource->accessReturnIndex() = -1;
         }
     }
+
+    if (tempQueue.empty()) {
+        return;
+    }
+
+    // Trace after the lock has been released so we can simply record the tempQueue size.
+    TRACE_EVENT1("skia.gpu.cache", TRACE_FUNC, "count", tempQueue.size());
+
     for (auto& nextResource : tempQueue) {
         auto [resource, ref] = nextResource;
         // We need this check here to handle the following scenario. A Resource is sitting in the
@@ -326,6 +362,9 @@ bool ResourceCache::inPurgeableQueue(Resource* resource) const {
 void ResourceCache::purgeResource(Resource* resource) {
     SkASSERT(resource->isPurgeable());
 
+    TRACE_EVENT_INSTANT1("skia.gpu.cache", TRACE_FUNC, TRACE_EVENT_SCOPE_THREAD,
+                         "size", resource->gpuMemorySize());
+
     fResourceMap.remove(resource->key(), resource);
 
     if (resource->shouldDeleteASAP() == Resource::DeleteASAP::kNo) {
@@ -371,13 +410,26 @@ void ResourceCache::purgeAsNeeded() {
 
 void ResourceCache::purgeResourcesNotUsedSince(StdSteadyClock::time_point purgeTime) {
     ASSERT_SINGLE_OWNER
+    this->purgeResources(&purgeTime);
+}
 
-    fProxyCache->purgeProxiesNotUsedSince(purgeTime);
+void ResourceCache::purgeResources() {
+    ASSERT_SINGLE_OWNER
+    this->purgeResources(nullptr);
+}
+
+void ResourceCache::purgeResources(const StdSteadyClock::time_point* purgeTime) {
+    TRACE_EVENT0("skia.gpu.cache", TRACE_FUNC);
+    if (fProxyCache) {
+        fProxyCache->purgeProxiesNotUsedSince(purgeTime);
+    }
     this->processReturnedResources();
 
     // Early out if the very first item is too new to purge to avoid sorting the queue when
     // nothing will be deleted.
-    if (fPurgeableQueue.count() && fPurgeableQueue.peek()->lastAccessTime() >= purgeTime) {
+    if (fPurgeableQueue.count() &&
+        purgeTime &&
+        fPurgeableQueue.peek()->lastAccessTime() >= *purgeTime) {
         return;
     }
 
@@ -390,7 +442,7 @@ void ResourceCache::purgeResourcesNotUsedSince(StdSteadyClock::time_point purgeT
         Resource* resource = fPurgeableQueue.at(i);
 
         const skgpu::StdSteadyClock::time_point resourceTime = resource->lastAccessTime();
-        if (resourceTime >= purgeTime) {
+        if (purgeTime && resourceTime >= *purgeTime) {
             // scratch or not, all later iterations will be too recently used to purge.
             break;
         }
@@ -482,6 +534,15 @@ void ResourceCache::setResourceTimestamp(Resource* resource, uint32_t timestamp)
         timestamp = kMaxTimestamp;
     }
     resource->setTimestamp(timestamp);
+}
+
+void ResourceCache::dumpMemoryStatistics(SkTraceMemoryDump* traceMemoryDump) const {
+    for (int i = 0; i < fNonpurgeableResources.size(); ++i) {
+        fNonpurgeableResources[i]->dumpMemoryStatistics(traceMemoryDump);
+    }
+    for (int i = 0; i < fPurgeableQueue.count(); ++i) {
+        fPurgeableQueue.at(i)->dumpMemoryStatistics(traceMemoryDump);
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -631,7 +692,7 @@ bool ResourceCache::isInCache(const Resource* resource) const {
 
 #endif // SK_DEBUG
 
-#if GRAPHITE_TEST_UTILS
+#if defined(GRAPHITE_TEST_UTILS)
 
 int ResourceCache::numFindableResources() const {
     return fResourceMap.count();
@@ -649,6 +710,20 @@ Resource* ResourceCache::topOfPurgeableQueue() {
     return fPurgeableQueue.peek();
 }
 
-#endif // GRAPHITE_TEST_UTILS
+void ResourceCache::visitTextures(
+        const std::function<void(const Texture*, bool purgeable)>& func) const {
+    for (int i = 0; i < fNonpurgeableResources.size(); ++i) {
+        if (const Texture* tex = fNonpurgeableResources[i]->asTexture()) {
+            func(tex, /* purgeable= */ false);
+        }
+    }
+    for (int i = 0; i < fPurgeableQueue.count(); ++i) {
+        if (const Texture* tex = fPurgeableQueue.at(i)->asTexture()) {
+            func(tex, /* purgeable= */ true);
+        }
+    }
+}
+
+#endif // defined(GRAPHITE_TEST_UTILS)
 
 } // namespace skgpu::graphite

@@ -13,7 +13,7 @@
 #include "src/sksl/SkSLProgramKind.h"
 #include "src/sksl/ir/SkSLProgram.h"
 
-#include "webgpu/webgpu_cpp.h"
+#include "webgpu/webgpu_cpp.h"  // NO_G3_REWRITE
 
 namespace SkSL {
 class Compiler;
@@ -33,17 +33,11 @@ bool DawnFormatIsStencil(wgpu::TextureFormat);
 
 wgpu::TextureFormat DawnDepthStencilFlagsToFormat(SkEnumBitMask<DepthStencilFlags>);
 
-bool SkSLToSPIRV(SkSL::Compiler*,
-                 const std::string& sksl,
-                 SkSL::ProgramKind kind,
-                 const SkSL::ProgramSettings& settings,
-                 std::string* spirv,
-                 SkSL::Program::Interface* outInterface,
-                 ShaderErrorHandler* errorHandler);
+bool DawnCompileWGSLShaderModule(const DawnSharedContext* sharedContext,
+                                 const std::string& wgsl,
+                                 wgpu::ShaderModule* module,
+                                 ShaderErrorHandler*);
 
-wgpu::ShaderModule DawnCompileSPIRVShaderModule(const DawnSharedContext* sharedContext,
-                                                const std::string& spirv,
-                                                ShaderErrorHandler* errorHandler);
 } // namespace skgpu::graphite
 
 #endif // skgpu_graphite_DawnGraphiteUtilsPriv_DEFINED

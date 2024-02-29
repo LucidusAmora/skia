@@ -10,7 +10,6 @@
 #include <memory>
 
 #include "include/private/base/SkTPin.h"
-#include "src/core/SkOpts.h"
 #include "src/gpu/ganesh/GrBackendUtils.h"
 #include "src/gpu/ganesh/GrCaps.h"
 #include "src/gpu/ganesh/GrOnFlushResourceProvider.h"
@@ -84,7 +83,7 @@ std::unique_ptr<GrDrawOpAtlas> GrDrawOpAtlas::Make(GrProxyProvider* proxyProvide
                                                            width, height, plotWidth, plotHeight,
                                                            generationCounter,
                                                            allowMultitexturing, label));
-    if (!atlas->getViews()[0].proxy()) {
+    if (!atlas->createPages(proxyProvider, generationCounter) || !atlas->getViews()[0].proxy()) {
         return nullptr;
     }
 
@@ -122,8 +121,6 @@ GrDrawOpAtlas::GrDrawOpAtlas(GrProxyProvider* proxyProvider, const GrBackendForm
     SkASSERT(fPlotHeight * numPlotsY == fTextureHeight);
 
     fNumPlots = numPlotsX * numPlotsY;
-
-    this->createPages(proxyProvider, generationCounter);
 }
 
 inline void GrDrawOpAtlas::processEviction(PlotLocator plotLocator) {
@@ -142,7 +139,7 @@ void GrDrawOpAtlas::uploadPlotToTexture(GrDeferredTextureUploadWritePixelsFn& wr
 
     const void* dataPtr;
     SkIRect rect;
-    std::tie(dataPtr, rect) = plot->prepareForUpload(/*useCachedUploads=*/false);
+    std::tie(dataPtr, rect) = plot->prepareForUpload();
 
     writePixels(proxy,
                 rect,
@@ -153,7 +150,10 @@ void GrDrawOpAtlas::uploadPlotToTexture(GrDeferredTextureUploadWritePixelsFn& wr
 
 inline bool GrDrawOpAtlas::updatePlot(GrDeferredUploadTarget* target,
                                       AtlasLocator* atlasLocator, Plot* plot) {
-    int pageIdx = plot->pageIndex();
+    uint32_t pageIdx = plot->pageIndex();
+    if (pageIdx >= fNumActivePages) {
+        return false;
+    }
     this->makeMRU(plot, pageIdx);
 
     // If our most recent upload has already occurred then we have to insert a new
@@ -423,7 +423,7 @@ void GrDrawOpAtlas::compact(AtlasToken startTokenForNextFlush) {
         // to evict them if there's available space in earlier pages. Since we prioritize uploading
         // to the first pages, this will eventually clear out usage of this page unless we have a
         // large need.
-        if (availablePlots.size() && usedPlots && usedPlots <= fNumPlots / 4) {
+        if (!availablePlots.empty() && usedPlots && usedPlots <= fNumPlots / 4) {
             plotIter.init(fPages[lastPageIndex].fPlotList, PlotList::Iter::kHead_IterStart);
             while (Plot* plot = plotIter.get()) {
                 // If this plot was used recently
@@ -431,13 +431,13 @@ void GrDrawOpAtlas::compact(AtlasToken startTokenForNextFlush) {
                     // See if there's room in an earlier page and if so evict.
                     // We need to be somewhat harsh here so that a handful of plots that are
                     // consistently in use don't end up locking the page in memory.
-                    if (availablePlots.size() > 0) {
+                    if (!availablePlots.empty()) {
                         this->processEvictionAndResetRects(plot);
                         this->processEvictionAndResetRects(availablePlots.back());
                         availablePlots.pop_back();
                         --usedPlots;
                     }
-                    if (!usedPlots || !availablePlots.size()) {
+                    if (!usedPlots || availablePlots.empty()) {
                         break;
                     }
                 }
@@ -479,7 +479,7 @@ bool GrDrawOpAtlas::createPages(
                                                                  dims,
                                                                  GrRenderable::kNo,
                                                                  1,
-                                                                 GrMipmapped::kNo,
+                                                                 skgpu::Mipmapped::kNo,
                                                                  SkBackingFit::kExact,
                                                                  skgpu::Budgeted::kYes,
                                                                  GrProtected::kNo,

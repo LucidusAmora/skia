@@ -5,11 +5,13 @@
  * found in the LICENSE file.
  */
 
+#include "include/core/SkColorSpace.h"
 #include "include/core/SkRefCnt.h"
 #include "include/core/SkSurface.h"
 #include "include/gpu/GrBackendSurface.h"
 #include "include/gpu/ganesh/mtl/SkSurfaceMetal.h"
 #include "include/gpu/mtl/GrMtlTypes.h"
+#include "src/core/SkSurfacePriv.h"
 #include "src/gpu/ganesh/GrProxyProvider.h"
 #include "src/gpu/ganesh/GrRecordingContextPriv.h"
 #include "src/gpu/ganesh/GrResourceProvider.h"
@@ -43,7 +45,7 @@ sk_sp<SkSurface> WrapCAMetalLayer(GrRecordingContext* rContext,
     SkISize dims = {(int)metalLayer.drawableSize.width, (int)metalLayer.drawableSize.height};
 
     GrProxyProvider::TextureInfo texInfo;
-    texInfo.fMipmapped = GrMipmapped::kNo;
+    texInfo.fMipmapped = skgpu::Mipmapped::kNo;
     texInfo.fTextureType = GrTextureType::k2D;
 
     sk_sp<GrRenderTargetProxy> proxy = proxyProvider->createLazyRenderTargetProxy(
@@ -115,7 +117,7 @@ sk_sp<SkSurface> WrapMTKView(GrRecordingContext* rContext,
     SkISize dims = {(int)mtkView.drawableSize.width, (int)mtkView.drawableSize.height};
 
     GrProxyProvider::TextureInfo texInfo;
-    texInfo.fMipmapped = GrMipmapped::kNo;
+    texInfo.fMipmapped = skgpu::Mipmapped::kNo;
     texInfo.fTextureType = GrTextureType::k2D;
 
     sk_sp<GrRenderTargetProxy> proxy = proxyProvider->createLazyRenderTargetProxy(
@@ -170,29 +172,3 @@ sk_sp<SkSurface> WrapMTKView(GrRecordingContext* rContext,
 }
 
 }  // namespace SkSurfaces
-
-#if !defined(SK_DISABLE_LEGACY_SKSURFACE_FACTORIES)
-sk_sp<SkSurface> SkSurface::MakeFromCAMetalLayer(GrRecordingContext* context,
-                                                 GrMTLHandle layer,
-                                                 GrSurfaceOrigin origin,
-                                                 int sampleCnt,
-                                                 SkColorType colorType,
-                                                 sk_sp<SkColorSpace> colorSpace,
-                                                 const SkSurfaceProps* surfaceProps,
-                                                 GrMTLHandle* drawable) {
-    return SkSurfaces::WrapCAMetalLayer(
-            context, layer, origin, sampleCnt, colorType, colorSpace, surfaceProps, drawable);
-}
-
-sk_sp<SkSurface> SkSurface::MakeFromMTKView(GrRecordingContext* context,
-                                            GrMTLHandle mtkView,
-                                            GrSurfaceOrigin origin,
-                                            int sampleCnt,
-                                            SkColorType colorType,
-                                            sk_sp<SkColorSpace> colorSpace,
-                                            const SkSurfaceProps* surfaceProps) {
-    return SkSurfaces::WrapMTKView(
-            context, mtkView, origin, sampleCnt, colorType, colorSpace, surfaceProps);
-}
-
-#endif

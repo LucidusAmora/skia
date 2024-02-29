@@ -14,9 +14,8 @@
 #include "include/core/SkPixmap.h"
 #include "include/gpu/GpuTypes.h"
 #include "include/gpu/GrDirectContext.h"
-#include "include/gpu/GrTypes.h"
-#include "include/gpu/ganesh/GrTextureGenerator.h"
 #include "include/gpu/ganesh/SkImageGanesh.h"
+#include "include/private/gpu/ganesh/GrTextureGenerator.h" // IWYU pragma: keep
 #include "src/gpu/ganesh/GrColorInfo.h"
 #include "src/gpu/ganesh/GrDirectContextPriv.h"
 #include "src/gpu/ganesh/GrSurfaceProxyView.h"
@@ -41,10 +40,8 @@ bool SkImage_LazyTexture::readPixelsProxy(GrDirectContext* ctx, const SkPixmap& 
     if (!ctx) {
         return false;
     }
-    GrSurfaceProxyView view = skgpu::ganesh::LockTextureProxyView(ctx,
-                                                                  this,
-                                                                  GrImageTexGenPolicy::kDraw,
-                                                                  GrMipmapped::kNo);
+    GrSurfaceProxyView view = skgpu::ganesh::LockTextureProxyView(
+            ctx, this, GrImageTexGenPolicy::kDraw, skgpu::Mipmapped::kNo);
 
     if (!view) {
         return false;

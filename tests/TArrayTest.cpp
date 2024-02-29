@@ -353,21 +353,58 @@ template<typename Array> static void test_reserve(skiatest::Reporter* reporter) 
 
         // Test setting reserve after constructor.
         Array array2;
-        array2.reserve_back(reserveCount);
+        array2.reserve(reserveCount);
         test_array_reserve(reporter, &array2, reserveCount);
 
         // Test increasing reserve after constructor.
         Array array3(reserveCount/2);
-        array3.reserve_back(reserveCount);
+        array3.reserve(reserveCount);
         test_array_reserve(reporter, &array3, reserveCount);
 
         // Test setting reserve on non-empty array.
         Array array4;
         array4.push_back_n(reserveCount);
-        array4.reserve_back(reserveCount);
+        array4.reserve(2 * reserveCount);
         array4.pop_back_n(reserveCount);
         test_array_reserve(reporter, &array4, 2 * reserveCount);
     }
+}
+
+template <typename T>
+static void test_inner_push(skiatest::Reporter* reporter) {
+    T a;
+    a.push_back(12345);
+    for (int x=0; x<50; ++x) {
+        a.push_back(a.front());
+    }
+    for (int x=0; x<50; ++x) {
+        a.push_back(a.back());
+    }
+
+    REPORTER_ASSERT(reporter, a.size() == 101);
+    REPORTER_ASSERT(reporter, std::count(a.begin(), a.end(), 12345) == a.size());
+}
+
+struct EmplaceStruct {
+    EmplaceStruct(int v) : fValue(v) {}
+    int fValue;
+};
+
+template <typename T>
+static void test_inner_emplace(skiatest::Reporter* reporter) {
+    T a;
+    a.emplace_back(12345);
+    for (int x=0; x<50; ++x) {
+        a.emplace_back(a.front().fValue);
+    }
+    for (int x=0; x<50; ++x) {
+        a.emplace_back(a.back().fValue);
+    }
+
+    REPORTER_ASSERT(reporter, a.size() == 101);
+    REPORTER_ASSERT(reporter, std::all_of(a.begin(), a.end(), [](const EmplaceStruct& s) {
+                        return s.fValue == 12345;
+                    }));
 }
 
 DEF_TEST(TArray, reporter) {
@@ -402,6 +439,16 @@ DEF_TEST(TArray, reporter) {
     test_construction<STArray<7, TestClass>>(reporter);
     test_construction<STArray<10, float>>(reporter);
 
+    test_inner_push<TArray<int>>(reporter);
+    test_inner_push<STArray<1, int>>(reporter);
+    test_inner_push<STArray<99, int>>(reporter);
+    test_inner_push<STArray<200, int>>(reporter);
+
+    test_inner_emplace<TArray<EmplaceStruct>>(reporter);
+    test_inner_emplace<STArray<1, EmplaceStruct>>(reporter);
+    test_inner_emplace<STArray<99, EmplaceStruct>>(reporter);
+    test_inner_emplace<STArray<200, EmplaceStruct>>(reporter);
+
     test_skstarray_compatibility<STArray<1, int>, TArray<int>>(reporter);
     test_skstarray_compatibility<STArray<5, char>, TArray<char>>(reporter);
     test_skstarray_compatibility<STArray<10, float>, TArray<float>>(reporter);
@@ -412,4 +459,11 @@ DEF_TEST(TArray, reporter) {
     test_skstarray_compatibility<STArray<1, long>, STArray<10, long>>(reporter);
     test_skstarray_compatibility<STArray<3, double>, STArray<4, double>>(reporter);
     test_skstarray_compatibility<STArray<2, short>, STArray<1, short>>(reporter);
+}
+
+DEF_TEST(TArray_BoundsCheck, reporter) {
+#if 0  // The v[0] fails
+    TArray<int> v;
+    v[0];
+#endif
 }

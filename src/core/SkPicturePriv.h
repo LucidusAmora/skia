@@ -33,7 +33,7 @@ public:
     static void Flatten(const sk_sp<const SkPicture> , SkWriteBuffer& buffer);
 
     // Returns NULL if this is not an SkBigPicture.
-    static const SkBigPicture* AsSkBigPicture(const sk_sp<const SkPicture> picture) {
+    static const SkBigPicture* AsSkBigPicture(const sk_sp<const SkPicture>& picture) {
         return picture->asSkBigPicture();
     }
 
@@ -107,6 +107,14 @@ public:
     // V94: Removed local matrices from SkShaderBase. Local matrices always use SkLocalMatrixShader.
     // V95: SkImageFilters::Shader only saves SkShader, not a full SkPaint
     // V96: SkImageFilters::Magnifier updated with more complete parameters
+    // V97: SkImageFilters::RuntimeShader takes a sample radius
+    // V98: Merged SkImageFilters::Blend and ::Arithmetic implementations
+    // V99: Remove legacy Magnifier filter
+    // V100: SkImageFilters::DropShadow does not have a dedicated implementation
+    // V101: Crop image filter supports all SkTileModes instead of just kDecal
+    // V102: Convolution image filter uses ::Crop to apply tile mode
+    // V103: Remove deprecated per-image filter crop rect
+    // v104: SaveLayer supports multiple image filters
 
     enum Version {
         kPictureShaderFilterParam_Version   = 82,
@@ -124,6 +132,14 @@ public:
         kNoShaderLocalMatrix                = 94,
         kShaderImageFilterSerializeShader   = 95,
         kRevampMagnifierFilter              = 96,
+        kRuntimeImageFilterSampleRadius     = 97,
+        kCombineBlendArithmeticFilters      = 98,
+        kRemoveLegacyMagnifierFilter        = 99,
+        kDropShadowImageFilterComposition   = 100,
+        kCropImageFilterSupportsTiling      = 101,
+        kConvolutionImageFilterTilingUpdate = 102,
+        kRemoveDeprecatedCropRect           = 103,
+        kMultipleFiltersOnSaveLayer         = 104,
 
         // Only SKPs within the min/current picture version range (inclusive) can be read.
         //
@@ -148,7 +164,7 @@ public:
         //
         // Contact the Infra Gardener if the above steps do not work for you.
         kMin_Version     = kPictureShaderFilterParam_Version,
-        kCurrent_Version = kRevampMagnifierFilter
+        kCurrent_Version = kMultipleFiltersOnSaveLayer
     };
 };
 

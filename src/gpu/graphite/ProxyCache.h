@@ -38,7 +38,9 @@ public:
 
     sk_sp<TextureProxy> findOrCreateCachedProxy(Recorder*, const SkBitmap&, Mipmapped);
 
-#if GRAPHITE_TEST_UTILS
+    void purgeAll();
+
+#if defined(GRAPHITE_TEST_UTILS)
     int numCached() const;
     sk_sp<TextureProxy> find(const SkBitmap&, Mipmapped);
     void forceProcessInvalidKeyMsgs();
@@ -51,7 +53,7 @@ private:
 
     void processInvalidKeyMsgs();
     void freeUniquelyHeld();
-    void purgeProxiesNotUsedSince(skgpu::StdSteadyClock::time_point purgeTime);
+    void purgeProxiesNotUsedSince(const skgpu::StdSteadyClock::time_point* purgeTime);
 
     typedef SkMessageBus<skgpu::UniqueKeyInvalidatedMsg_Graphite, uint32_t>::Inbox InvalidKeyInbox;
 

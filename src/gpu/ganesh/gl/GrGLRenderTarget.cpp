@@ -9,6 +9,7 @@
 
 #include "include/core/SkTraceMemoryDump.h"
 #include "include/gpu/GrDirectContext.h"
+#include "include/gpu/ganesh/gl/GrGLBackendSurface.h"
 #include "src/gpu/ganesh/GrBackendUtils.h"
 #include "src/gpu/ganesh/GrDirectContextPriv.h"
 #include "src/gpu/ganesh/GrGpuResourcePriv.h"
@@ -123,19 +124,21 @@ GrBackendRenderTarget GrGLRenderTarget::getBackendRenderTarget() const {
         numStencilBits = GrBackendFormatStencilBits(stencil->backendFormat());
     }
 
-    return GrBackendRenderTarget(
+    return GrBackendRenderTargets::MakeGL(
             this->width(), this->height(), this->numSamples(), numStencilBits, fbi);
 }
 
 GrBackendFormat GrGLRenderTarget::backendFormat() const {
     // We should never have a GrGLRenderTarget (even a textureable one with a target that is not
     // texture 2D.
-    return GrBackendFormat::MakeGL(GrGLFormatToEnum(fRTFormat), GR_GL_TEXTURE_2D);
+    return GrBackendFormats::MakeGL(GrGLFormatToEnum(fRTFormat), GR_GL_TEXTURE_2D);
 }
 
 size_t GrGLRenderTarget::onGpuMemorySize() const {
-    return GrSurface::ComputeSize(this->backendFormat(), this->dimensions(),
-                                  fTotalMemorySamplesPerPixel, GrMipmapped::kNo);
+    return GrSurface::ComputeSize(this->backendFormat(),
+                                  this->dimensions(),
+                                  fTotalMemorySamplesPerPixel,
+                                  skgpu::Mipmapped::kNo);
 }
 
 void GrGLRenderTarget::onSetLabel() {
@@ -351,8 +354,10 @@ void GrGLRenderTarget::dumpMemoryStatistics(SkTraceMemoryDump* traceMemoryDump) 
         --numSamplesNotInTexture;  // GrGLTexture::dumpMemoryStatistics accounts for 1 sample.
     }
     if (numSamplesNotInTexture >= 1) {
-        size_t size = GrSurface::ComputeSize(this->backendFormat(), this->dimensions(),
-                                             numSamplesNotInTexture, GrMipmapped::kNo);
+        size_t size = GrSurface::ComputeSize(this->backendFormat(),
+                                             this->dimensions(),
+                                             numSamplesNotInTexture,
+                                             skgpu::Mipmapped::kNo);
 
         // Due to this resource having both a texture and a renderbuffer component, dump as
         // skia/gpu_resources/resource_#/renderbuffer

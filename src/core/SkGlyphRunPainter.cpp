@@ -166,7 +166,7 @@ SkGlyphRunListPainterCPU::SkGlyphRunListPainterCPU(const SkSurfaceProps& props,
                                                    SkColorType colorType,
                                                    SkColorSpace* cs)
         : fDeviceProps{props}
-        , fBitmapFallbackProps{SkSurfaceProps{props.flags(), kUnknown_SkPixelGeometry}}
+        , fBitmapFallbackProps{props.cloneWithPixelGeometry(kUnknown_SkPixelGeometry)}
         , fColorType{colorType}
         , fScalerContextFlags{compute_scaler_context_flags(cs)} {}
 
@@ -303,6 +303,9 @@ void SkGlyphRunListPainterCPU::drawForBitmapDevice(SkCanvas* canvas,
 
             // Calculate the scale that makes the longest edge 1:1 with its side in the cache.
             for (auto [glyph, pos] : SkMakeZip(glyphs, positions)) {
+                if (glyph->isEmpty()) {
+                    continue;
+                }
                 SkPoint corners[4];
                 SkPoint srcPos = pos + drawOrigin;
                 // Store off the positions in device space to position the glyphs during drawing.
@@ -352,8 +355,9 @@ void SkGlyphRunListPainterCPU::drawForBitmapDevice(SkCanvas* canvas,
                 }
                 SkBitmap bm;
                 bm.installPixels(SkImageInfo::MakeN32Premul(mask.fBounds.size()),
-                                 mask.fImage,
+                                 const_cast<uint8_t*>(mask.fImage),
                                  mask.fRowBytes);
+                bm.setImmutable();
 
                 // Since the glyph in the cache is scaled by maxScale, its top left vector is too
                 // long. Reduce it to find proper positions on the device.
@@ -367,9 +371,7 @@ void SkGlyphRunListPainterCPU::drawForBitmapDevice(SkCanvas* canvas,
 
                 // Draw the bitmap using the rect from the scaled cache, and not the source
                 // rectangle for the glyph.
-                bitmapDevice->drawBitmap(
-                        bm, translate, nullptr, SkSamplingOptions{SkFilterMode::kLinear},
-                        paint);
+                bitmapDevice->drawBitmap(bm, translate, nullptr, SkFilterMode::kLinear, paint);
             }
         }
 

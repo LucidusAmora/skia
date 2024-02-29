@@ -12,7 +12,7 @@
 #include "include/gpu/graphite/Recorder.h"
 #include "include/gpu/graphite/dawn/DawnTypes.h"
 
-#include "webgpu/webgpu_cpp.h"
+#include "webgpu/webgpu_cpp.h"  // NO_G3_REWRITE
 
 using namespace skgpu::graphite;
 
@@ -20,7 +20,10 @@ namespace {
 const SkISize kSize = {16, 16};
 }
 
-DEF_GRAPHITE_TEST_FOR_DAWN_CONTEXT(DawnBackendTextureSimpleCreationTest, reporter, context) {
+DEF_GRAPHITE_TEST_FOR_DAWN_CONTEXT(DawnBackendTextureSimpleCreationTest,
+                                   reporter,
+                                   context,
+                                   testContext) {
     auto recorder = context->makeRecorder();
 
     DawnTextureInfo textureInfo;
@@ -41,7 +44,10 @@ DEF_GRAPHITE_TEST_FOR_DAWN_CONTEXT(DawnBackendTextureSimpleCreationTest, reporte
 }
 
 // Test that copying BackendTexture variables works.
-DEF_GRAPHITE_TEST_FOR_DAWN_CONTEXT(DawnBackendTextureCopyVariableTest, reporter, context) {
+DEF_GRAPHITE_TEST_FOR_DAWN_CONTEXT(DawnBackendTextureCopyVariableTest,
+                                   reporter,
+                                   context,
+                                   testContext) {
     auto recorder = context->makeRecorder();
 
     DawnTextureInfo textureInfo;

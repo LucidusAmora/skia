@@ -5,12 +5,12 @@
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
-#include "include/core/SkEncodedImageFormat.h"
 #include "include/core/SkSpan.h"
 #include "include/core/SkStream.h"
 #include "include/core/SkString.h"
 #include "include/core/SkTypeface.h"
 #include "modules/skunicode/include/SkUnicode.h"
+#include "src/base/SkBitmaskEnum.h"
 #include "tests/Test.h"
 
 #include <vector>
@@ -27,7 +27,7 @@ UNIX_ONLY_TEST(SkUnicode_Client, reporter) {
     client->computeCodeUnitFlags(utf8.data(), utf8.size(), false, &results);
 
     for (auto flag : results) {
-        REPORTER_ASSERT(reporter, !SkUnicode::isPartOfWhiteSpaceBreak(flag));
+        REPORTER_ASSERT(reporter, !SkUnicode::hasPartOfWhiteSpaceBreakFlag(flag));
     }
 }
 #endif
@@ -39,21 +39,43 @@ UNIX_ONLY_TEST(SkUnicode_Native, reporter) {
     skia_private::TArray<SkUnicode::CodeUnitFlags, true> results;
     icu->computeCodeUnitFlags(utf8.data(), utf8.size(), false, &results);
     for (auto flag : results) {
-        REPORTER_ASSERT(reporter, !SkUnicode::isPartOfWhiteSpaceBreak(flag));
+        REPORTER_ASSERT(reporter, !SkUnicode::hasPartOfWhiteSpaceBreakFlag(flag));
     }
 }
 #endif
-UNIX_ONLY_TEST(SkUnicode_GetWords, reporter) {
+
+#ifdef SK_UNICODE_LIBGRAPHEME_IMPLEMENTATION
+UNIX_ONLY_TEST(SkUnicode_GetUtf8Words, reporter) {
     SkString text("1 22 333 4444 55555 666666 7777777");
     std::vector<SkUnicode::Position> expected = { 0, 1, 2, 4, 5, 8, 9, 13, 14, 19, 20, 26, 27, 34 };
-    auto icu = SkUnicode::Make();
+    auto libgrapheme = SkUnicode::MakeLibgraphemeBasedUnicode();
     std::vector<SkUnicode::Position> results;
-    auto result = icu->getWords(text.data(), text.size(), "en", &results);
+    auto result = libgrapheme->getUtf8Words(text.data(), text.size(), "en", &results);
     REPORTER_ASSERT(reporter, result);
     REPORTER_ASSERT(reporter, results.size() == expected.size());
     for (auto i = 0ul; i < results.size(); ++i) {
         REPORTER_ASSERT(reporter, results[i] == expected[i]);
     }
+}
+#endif
+
+#ifdef SK_UNICODE_ICU_IMPLEMENTATION
+UNIX_ONLY_TEST(SkUnicode_GetSentences, reporter) {
+    SkString text("Hello world! Hello world? Hello world... Not a sentence end: 3.1415926");
+    std::vector<SkUnicode::Position> expected = {0, 13, 26, 41, 70};
+    auto icu = SkUnicode::Make();
+    std::vector<SkUnicode::Position> results;
+    auto result = icu->getSentences(text.data(), text.size(), nullptr, &results);
+    REPORTER_ASSERT(reporter, result);
+    REPORTER_ASSERT(reporter, results.size() == expected.size());
+    for (auto i = 0ul; i < results.size(); ++i) {
+        REPORTER_ASSERT(reporter, results[i] == expected[i]);
+    }
+}
+#endif
+
+bool hasWordFlag(SkUnicode::CodeUnitFlags flags) {
+    return (flags & SkUnicode::kWordBreak) == SkUnicode::kWordBreak;
 }
 
 UNIX_ONLY_TEST(SkUnicode_GetBidiRegionsLTR, reporter) {
@@ -141,6 +163,7 @@ UNIX_ONLY_TEST(SkUnicode_GetBidiRegionsMix2, reporter) {
     }
 }
 
+#ifndef SK_UNICODE_ICU4X_IMPLEMENTATION
 UNIX_ONLY_TEST(SkUnicode_ToUpper, reporter) {
     SkString lower("abcdefghijklmnopqrstuvwxyz");
     SkString upper("ABCDEFGHIJKLMNOPQRSTUVWXYZ");
@@ -150,6 +173,7 @@ UNIX_ONLY_TEST(SkUnicode_ToUpper, reporter) {
     auto icu_result2 = icu->toUpper(upper);
     REPORTER_ASSERT(reporter, icu_result2.equals(upper));
 }
+#endif
 
 UNIX_ONLY_TEST(SkUnicode_ComputeCodeUnitFlags, reporter) {
     //SkString text("World domination is such an ugly phrase - I prefer to call it world optimisation");
@@ -198,4 +222,30 @@ UNIX_ONLY_TEST(SkUnicode_ReorderVisual, reporter) {
     reorder({0}, {0});
     reorder({1}, {0});
     reorder({0, 1, 0, 1}, {0, 1, 2, 3});
+}
+
+#ifdef SK_UNICODE_ICU_IMPLEMENTATION
+UNIX_ONLY_TEST(SkUnicode_Emoji, reporter) {
+    std::u32string emojis(U"😄😁😆😅😂🤣");
+    std::u32string not_emojis(U"満毎行昼本可");
+    auto icu = SkUnicode::Make();
+    for (auto e : emojis) {
+        REPORTER_ASSERT(reporter, icu->isEmoji(e));
+    }
+    for (auto n: not_emojis) {
+        REPORTER_ASSERT(reporter, !icu->isEmoji(n));
+    }
+}
+#endif
+
+UNIX_ONLY_TEST(SkUnicode_Ideographic, reporter) {
+    std::u32string ideographic(U"満毎行昼本可");
+    std::u32string not_ideographic(U"😄😁😆😅😂🤣");
+    auto icu = SkUnicode::Make();
+    for (auto i : ideographic) {
+        REPORTER_ASSERT(reporter, icu->isIdeographic(i));
+    }
+    for (auto n: not_ideographic) {
+        REPORTER_ASSERT(reporter, !icu->isIdeographic(n));
+    }
 }

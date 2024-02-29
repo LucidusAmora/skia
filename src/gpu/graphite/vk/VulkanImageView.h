@@ -10,33 +10,47 @@
 
 #include "include/gpu/vk/VulkanTypes.h"
 #include "src/gpu/graphite/Resource.h"
+#include "src/gpu/graphite/vk/VulkanSamplerYcbcrConversion.h"
 
 namespace skgpu::graphite {
 
 class VulkanSharedContext;
+class VulkanResourceProvider;
 
-class VulkanImageView : public Resource {
+/*
+ * VulkanImageView is not derived from Resource as its lifetime is dependent on the lifetime of
+ * its associated VulkanTexture. Hence VulkanTexture will act as a container for its ImageViews
+ * w.r.t. the ResourceCache and CommandBuffer, and is responsible for deleting its ImageView
+ * children when freeGpuData() is called.
+ */
+class VulkanImageView {
 public:
-    enum class Type {
-        kColor,
-        kStencil
+    enum class Usage {
+        kShaderInput,
+        kAttachment
     };
 
-    static sk_sp<const VulkanImageView> Make(VulkanSharedContext* sharedContext,
-                                             VkImage image,
-                                             VkFormat format,
-                                             Type viewType,
-                                             uint32_t miplevels);
+    static std::unique_ptr<const VulkanImageView> Make(
+            const VulkanSharedContext* sharedContext,
+            VkImage image,
+            VkFormat format,
+            Usage usage,
+            uint32_t miplevels,
+            sk_sp<VulkanSamplerYcbcrConversion>);
+    ~VulkanImageView();
 
     VkImageView imageView() const { return fImageView; }
+    Usage usage() const { return fUsage; }
 
 private:
-    VulkanImageView(const VulkanSharedContext* sharedContext, VkImageView imageView);
+    VulkanImageView(const VulkanSharedContext*, VkImageView, Usage,
+                    sk_sp<VulkanSamplerYcbcrConversion>);
 
-    void freeGpuData() override;
-
+    // Since we're not derived from Resource we need to store the context for deletion later
+    const VulkanSharedContext* fSharedContext;
     VkImageView  fImageView;
-    // TODO: track associated SamplerYcbcrConversion
+    Usage fUsage;
+    sk_sp<VulkanSamplerYcbcrConversion> fYcbcrConversion;
 };
 
 }  // namespace skgpu::graphite

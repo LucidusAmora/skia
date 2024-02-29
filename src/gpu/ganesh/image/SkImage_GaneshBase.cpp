@@ -13,26 +13,24 @@
 #include "include/core/SkColorType.h"
 #include "include/core/SkImage.h"
 #include "include/core/SkImageInfo.h"
-#include "include/core/SkMatrix.h"
 #include "include/core/SkPixmap.h"
-#include "include/core/SkPoint.h"
-#include "include/core/SkPromiseImageTexture.h"
 #include "include/core/SkRect.h"
 #include "include/core/SkSize.h"
-#include "include/core/SkSurfaceProps.h"
 #include "include/core/SkTypes.h"
 #include "include/gpu/GpuTypes.h"
 #include "include/gpu/GrBackendSurface.h"
 #include "include/gpu/GrDirectContext.h"
 #include "include/gpu/GrRecordingContext.h"
+#include "include/gpu/GrTypes.h"
+#include "include/gpu/ganesh/SkImageGanesh.h"
+#include "include/private/chromium/GrPromiseImageTexture.h"
+#include "include/private/chromium/SkImageChromium.h"
 #include "include/private/gpu/ganesh/GrTypesPriv.h"
 #include "src/core/SkBitmapCache.h"
 #include "src/core/SkColorSpacePriv.h"
-#include "src/core/SkImageFilterCache.h"
 #include "src/core/SkImageFilterTypes.h"
 #include "src/core/SkImageFilter_Base.h"
 #include "src/core/SkImageInfoPriv.h"
-#include "src/core/SkSpecialImage.h"
 #include "src/gpu/RefCntedCallback.h"
 #include "src/gpu/SkBackingFit.h"
 #include "src/gpu/ganesh/GrCaps.h"
@@ -58,6 +56,7 @@
 
 class GrContextThreadSafeProxy;
 class SkImageFilter;
+struct SkIPoint;
 
 SkImage_GaneshBase::SkImage_GaneshBase(sk_sp<GrImageContext> context,
                                        SkImageInfo info,
@@ -294,54 +293,10 @@ sk_sp<SkImage> SkImage_GaneshBase::makeColorTypeAndColorSpace(GrDirectContext* d
     return this->onMakeColorTypeAndColorSpace(targetColorType, std::move(targetCS), dContext);
 }
 
-sk_sp<SkImage> SkImage_GaneshBase::makeWithFilter(GrRecordingContext* rContext,
-                                                  const SkImageFilter* filter,
-                                                  const SkIRect& subset,
-                                                  const SkIRect& clipBounds,
-                                                  SkIRect* outSubset,
-                                                  SkIPoint* offset) const {
-    if (!filter || !outSubset || !offset || !this->bounds().contains(subset)) {
-        return nullptr;
-    }
-    auto myContext = this->context();
-    if (!myContext || !myContext->priv().matches(rContext)) {
-        return nullptr;
-    }
-    auto srcSpecialImage = SkSpecialImage::MakeFromImage(
-            rContext, subset, sk_ref_sp(const_cast<SkImage_GaneshBase*>(this)), SkSurfaceProps());
-    if (!srcSpecialImage) {
-        return nullptr;
-    }
-
-    sk_sp<SkImageFilterCache> cache(
-            SkImageFilterCache::Create(SkImageFilterCache::kDefaultTransientSize));
-
-    // The filters operate in the local space of the src image, where (0,0) corresponds to the
-    // subset's top left corner. But the clip bounds and any crop rects on the filters are in the
-    // original coordinate system, so configure the CTM to correct crop rects and explicitly adjust
-    // the clip bounds (since it is assumed to already be in image space).
-    // TODO: Once all image filters support it, we can just use the subset's top left corner as
-    // the source FilterResult's origin.
-    skif::ContextInfo ctxInfo = {
-            skif::Mapping(SkMatrix::Translate(-subset.x(), -subset.y())),
-            skif::LayerSpace<SkIRect>(clipBounds.makeOffset(-subset.topLeft())),
-            skif::FilterResult(srcSpecialImage),
-            this->imageInfo().colorType(),
-            this->imageInfo().colorSpace(),
-            /*fSurfaceProps=*/{},
-            cache.get()};
-
-    auto view = srcSpecialImage->view(rContext);
-    skif::Context context = skif::Context::MakeGanesh(rContext, view.origin(), ctxInfo);
-
-    return this->filterSpecialImage(
-            context, as_IFB(filter), srcSpecialImage.get(), subset, clipBounds, outSubset, offset);
-}
-
 sk_sp<GrTextureProxy> SkImage_GaneshBase::MakePromiseImageLazyProxy(
         GrContextThreadSafeProxy* tsp,
         SkISize dimensions,
-        GrBackendFormat backendFormat,
+        const GrBackendFormat& backendFormat,
         skgpu::Mipmapped mipmapped,
         SkImages::PromiseImageTextureFulfillProc fulfillProc,
         sk_sp<skgpu::RefCntedCallback> releaseHelper) {
@@ -363,11 +318,11 @@ sk_sp<GrTextureProxy> SkImage_GaneshBase::MakePromiseImageLazyProxy(
     /**
      * This class is the lazy instantiation callback for promise images. It manages calling the
      * client's Fulfill and Release procs. It attempts to reuse a GrTexture instance in
-     * cases where the client provides the same SkPromiseImageTexture as Fulfill results for
+     * cases where the client provides the same GrPromiseImageTexture as Fulfill results for
      * multiple SkImages. The created GrTexture is given a key based on a unique ID associated with
-     * the SkPromiseImageTexture.
+     * the GrPromiseImageTexture.
      *
-     * A key invalidation message is installed on the SkPromiseImageTexture so that the GrTexture
+     * A key invalidation message is installed on the GrPromiseImageTexture so that the GrTexture
      * is deleted once it can no longer be used to instantiate a proxy.
      */
     class PromiseLazyInstantiateCallback {
@@ -417,7 +372,7 @@ sk_sp<GrTextureProxy> SkImage_GaneshBase::MakePromiseImageLazyProxy(
             }
 
             SkImages::PromiseImageTextureContext textureContext = fReleaseHelper->context();
-            sk_sp<SkPromiseImageTexture> promiseTexture = fFulfillProc(textureContext);
+            sk_sp<GrPromiseImageTexture> promiseTexture = fFulfillProc(textureContext);
 
             if (!promiseTexture) {
                 fFulfillProcFailed = true;
@@ -463,4 +418,39 @@ sk_sp<SkImage> SubsetTextureFrom(GrDirectContext* context,
     return SkImages::TextureFromImage(context, subsetImg.get());
 }
 
+sk_sp<SkImage> MakeWithFilter(GrRecordingContext* rContext,
+                              sk_sp<SkImage> src,
+                              const SkImageFilter* filter,
+                              const SkIRect& subset,
+                              const SkIRect& clipBounds,
+                              SkIRect* outSubset,
+                              SkIPoint* offset) {
+    if (!rContext || !src || !filter) {
+        return nullptr;
+    }
+
+    GrSurfaceOrigin origin = kTopLeft_GrSurfaceOrigin;
+    if (as_IB(src)->isGaneshBacked()) {
+        SkImage_GaneshBase* base = static_cast<SkImage_GaneshBase*>(src.get());
+        origin = base->origin();
+    }
+
+    sk_sp<skif::Backend> backend =
+            skif::MakeGaneshBackend(sk_ref_sp(rContext), origin, {}, src->colorType());
+    return as_IFB(filter)->makeImageWithFilter(std::move(backend),
+                                               std::move(src),
+                                               subset,
+                                               clipBounds,
+                                               outSubset,
+                                               offset);
 }
+
+GrDirectContext* GetContext(const SkImage* src) {
+    if (!src || !as_IB(src)->isGaneshBacked()) {
+        return nullptr;
+    }
+    return as_IB(src)->directContext();
+}
+
+
+} // namespace SkImages

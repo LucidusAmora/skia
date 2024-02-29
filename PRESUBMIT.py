@@ -294,7 +294,8 @@ def _CheckBazelBUILDFiles(input_api, output_api):
     excluded_paths = ["infra/", "bazel/rbe/", "bazel/external/", "bazel/common_config_settings/",
                       "modules/canvaskit/go/", "experimental/", "bazel/platform", "third_party/",
                       "tests/", "resources/", "bazel/deps_parser/", "bazel/exporter_tool/",
-                      "tools/gpu/gl/interface/", "bazel/utils/", "include/config/"]
+                      "tools/gpu/gl/interface/", "bazel/utils/", "include/config/",
+                      "bench/", "example/external_client/"]
     is_excluded = any(affected_file_path.startswith(n) for n in excluded_paths)
     if is_bazel and not is_excluded:
       with open(affected_file_path, 'r') as file:
@@ -413,10 +414,15 @@ def _CheckBuildifier(input_api, output_api):
   BUILD.bazel or *.bzl files.
   """
   files = []
+  # Please keep the below exclude patterns in sync with those in the //:buildifier rule definition.
   for affected_file in input_api.AffectedFiles(include_deletes=False):
     affected_file_path = affected_file.LocalPath()
     if affected_file_path.endswith('BUILD.bazel') or affected_file_path.endswith('.bzl'):
-      if not affected_file_path.endswith('public.bzl') and not affected_file_path.endswith('go_repositories.bzl'):
+      if not affected_file_path.endswith('public.bzl') and \
+        not affected_file_path.endswith('go_repositories.bzl') and \
+        not "bazel/rbe/gce_linux/" in affected_file_path and \
+        not affected_file_path.startswith("third_party/externals/") and \
+        not "node_modules/" in affected_file_path:  # Skip generated files.
         files.append(affected_file_path)
   if not files:
     return []
@@ -433,7 +439,19 @@ def _CheckBuildifier(input_api, output_api):
     # One can change --lint=warn to --lint=fix to have things automatically fixed where possible.
     # However, --lint=fix will not cause a presubmit error if there are things that require
     # manual intervention, so we leave --lint=warn on by default.
-    output_api, ['buildifier', '--mode=fix', '--lint=warn'] + files)
+    #
+    # Please keep the below arguments in sync with those in the //:buildifier rule definition.
+    output_api, [
+      'buildifier',
+      '--mode=fix',
+      '--lint=warn',
+      '--warnings',
+      ','.join([
+        '-native-android',
+        '-native-cc',
+        '-native-py',
+      ])
+    ] + files)
 
 
 def _CheckBannedAPIs(input_api, output_api):
@@ -450,8 +468,8 @@ def _CheckBannedAPIs(input_api, output_api):
 
   # These defines are either there or not, and using them with just an #if is a
   # subtle, frustrating bug.
-  existence_defines = ['SK_GANESH', 'SK_GRAPHITE', 'SK_GL', 'SK_VULKAN', 'SK_DAWN',
-                       'SK_METAL', 'SK_DIRECT3D', 'SK_DEBUG']
+  existence_defines = ['SK_GANESH', 'SK_GRAPHITE', 'SK_GL', 'SK_VULKAN', 'SK_DAWN', 'SK_METAL',
+                       'SK_DIRECT3D', 'SK_DEBUG', 'GR_TEST_UTILS', 'GRAPHITE_TEST_UTILS']
   for d in existence_defines:
     banned_replacements.append(('#if {}'.format(d),
                                 '#if defined({})'.format(d)))

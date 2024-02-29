@@ -13,7 +13,6 @@
 #include "src/core/SkDistanceFieldGen.h"
 #include "src/core/SkDraw.h"
 #include "src/core/SkMatrixPriv.h"
-#include "src/core/SkMatrixProvider.h"
 #include "src/core/SkPointPriv.h"
 #include "src/core/SkRasterClip.h"
 #include "src/gpu/BufferWriter.h"
@@ -195,8 +194,8 @@ private:
         } else {
             flushInfo.fGeometryProcessor = GrBitmapTextGeoProc::Make(
                     target->allocator(), *target->caps().shaderCaps(), this->color(), fWideColor,
-                    views, numActiveProxies, GrSamplerState::Filter::kNearest,
-                    MaskFormat::kA8, invert, false);
+                    /*colorSpaceXform=*/nullptr, views, numActiveProxies,
+                    GrSamplerState::Filter::kNearest, MaskFormat::kA8, invert, false);
         }
 
         // allocate vertices
@@ -417,8 +416,7 @@ private:
             SkRasterClip rasterClip;
             rasterClip.setRect(devPathBounds);
             draw.fRC = &rasterClip;
-            SkMatrixProvider matrixProvider(drawMatrix);
-            draw.fMatrixProvider = &matrixProvider;
+            draw.fCTM = &drawMatrix;
             draw.fDst = dst;
 
             draw.drawPathCoverage(path, paint);
@@ -495,10 +493,9 @@ private:
 
         SkRasterClip rasterClip;
         rasterClip.setRect(devPathBounds);
-        draw.fRC = &rasterClip;
         drawMatrix.postTranslate(translateX, translateY);
-        SkMatrixProvider matrixProvider(drawMatrix);
-        draw.fMatrixProvider = &matrixProvider;
+        draw.fRC = &rasterClip;
+        draw.fCTM = &drawMatrix;
         draw.fDst = dst;
 
         draw.drawPathCoverage(path, paint);
@@ -637,7 +634,7 @@ private:
         return CombineResult::kMerged;
     }
 
-#if GR_TEST_UTILS
+#if defined(GR_TEST_UTILS)
     SkString onDumpInfo() const override {
         SkString string;
         for (const auto& geo : fShapes) {
@@ -732,7 +729,7 @@ bool SmallPathRenderer::onDrawPath(const DrawPathArgs& args) {
 
 }  // namespace skgpu::ganesh
 
-#if GR_TEST_UTILS
+#if defined(GR_TEST_UTILS)
 
 GR_DRAW_OP_TEST_DEFINE(SmallPathOp) {
     SkMatrix viewMatrix = GrTest::TestMatrix(random);
@@ -748,6 +745,6 @@ GR_DRAW_OP_TEST_DEFINE(SmallPathOp) {
                                             GrGetRandomStencil(random, context));
 }
 
-#endif // GR_TEST_UTILS
+#endif // defined(GR_TEST_UTILS)
 
 #endif // SK_ENABLE_OPTIMIZE_SIZE

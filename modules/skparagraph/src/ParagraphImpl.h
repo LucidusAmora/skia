@@ -12,7 +12,6 @@
 #include "include/core/SkSpan.h"
 #include "include/core/SkString.h"
 #include "include/core/SkTypes.h"
-#include "include/private/SkBitmaskEnum.h"
 #include "include/private/base/SkOnce.h"
 #include "include/private/base/SkTArray.h"
 #include "include/private/base/SkTemplates.h"
@@ -26,6 +25,7 @@
 #include "modules/skparagraph/src/Run.h"
 #include "modules/skparagraph/src/TextLine.h"
 #include "modules/skunicode/include/SkUnicode.h"
+#include "src/base/SkBitmaskEnum.h"
 #include "src/core/SkTHash.h"
 
 #include <memory>
@@ -62,9 +62,8 @@ struct StyleBlock {
 };
 
 struct ResolvedFontDescriptor {
-
     ResolvedFontDescriptor(TextIndex index, SkFont font)
-        : fFont(font), fTextStart(index) { }
+            : fFont(std::move(font)), fTextStart(index) {}
     SkFont fFont;
     TextIndex fTextStart;
 };
@@ -118,7 +117,7 @@ public:
     PositionWithAffinity getGlyphPositionAtCoordinate(SkScalar dx, SkScalar dy) override;
     SkRange<size_t> getWordBoundary(unsigned offset) override;
 
-    bool getApplyRoundingHack() const { return fApplyRoundingHack; }
+    bool getApplyRoundingHack() const { return fParagraphStyle.getApplyRoundingHack(); }
 
     size_t lineNumber() override { return fLines.size(); }
 
@@ -210,15 +209,24 @@ public:
     void updateBackgroundPaint(size_t from, size_t to, SkPaint paint) override;
 
     void visit(const Visitor&) override;
+    void extendedVisit(const ExtendedVisitor&) override;
+    int getPath(int lineNumber, SkPath* dest) override;
+    bool containsColorFontOrBitmap(SkTextBlob* textBlob) override;
+    bool containsEmoji(SkTextBlob* textBlob) override;
 
     int getLineNumberAt(TextIndex codeUnitIndex) const override;
+    int getLineNumberAtUTF16Offset(size_t codeUnitIndex) override;
     bool getLineMetricsAt(int lineNumber, LineMetrics* lineMetrics) const override;
     TextRange getActualTextRange(int lineNumber, bool includeSpaces) const override;
     bool getGlyphClusterAt(TextIndex codeUnitIndex, GlyphClusterInfo* glyphInfo) override;
     bool getClosestGlyphClusterAt(SkScalar dx,
                                   SkScalar dy,
                                   GlyphClusterInfo* glyphInfo) override;
+
+    bool getGlyphInfoAtUTF16Offset(size_t codeUnitIndex, GlyphInfo* graphemeInfo) override;
+    bool getClosestUTF16GlyphInfoAt(SkScalar dx, SkScalar dy, GlyphInfo* graphemeInfo) override;
     SkFont getFontAt(TextIndex codeUnitIndex) const override;
+    SkFont getFontAtUTF16Offset(size_t codeUnitIndex) override;
     std::vector<FontInfo> getFonts() const override;
 
     InternalLineMetrics getEmptyMetrics() const { return fEmptyMetrics; }
@@ -292,7 +300,6 @@ private:
     bool fHasLineBreaks;
     bool fHasWhitespacesInside;
     TextIndex fTrailingSpaces;
-    bool fApplyRoundingHack = std::getenv("SKPARAGRAPH_REMOVE_ROUNDING_HACK") == nullptr;
 };
 }  // namespace textlayout
 }  // namespace skia

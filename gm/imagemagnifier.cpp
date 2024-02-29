@@ -23,6 +23,7 @@
 #include "include/effects/SkImageFilters.h"
 #include "src/base/SkRandom.h"
 #include "tools/ToolUtils.h"
+#include "tools/fonts/FontToolUtils.h"
 #include "tools/timer/TimeUtils.h"
 
 #include <utility>
@@ -33,7 +34,7 @@
 static void draw_content(SkCanvas* canvas, float maxTextSize, int count) {
     const char* str = "The quick brown fox jumped over the lazy dog.";
     SkRandom rand;
-    SkFont      font(ToolUtils::create_portable_typeface());
+    SkFont   font = ToolUtils::DefaultPortableFont();
     for (int i = 0; i < count; ++i) {
         int x = rand.nextULessThan(WIDTH);
         int y = rand.nextULessThan(HEIGHT);
@@ -48,7 +49,7 @@ DEF_SIMPLE_GM_BG(imagemagnifier, canvas, WIDTH, HEIGHT, SK_ColorBLACK) {
         SkPaint filterPaint;
         filterPaint.setImageFilter(
                 SkImageFilters::Magnifier(SkRect::MakeWH(WIDTH, HEIGHT), 2.f, 100.f,
-                                          SkSamplingOptions{SkFilterMode::kLinear}, nullptr));
+                                          SkFilterMode::kLinear, nullptr));
         canvas->saveLayer(nullptr, &filterPaint);
         draw_content(canvas, 300.f, 25);
         canvas->restore();
@@ -80,7 +81,7 @@ static sk_sp<SkImage> make_img() {
 }
 
 DEF_SIMPLE_GM_BG(imagemagnifier_cropped, canvas, WIDTH_HEIGHT, WIDTH_HEIGHT, SK_ColorBLACK) {
-    sk_sp<SkImageFilter> imageSource(SkImageFilters::Image(make_img()));
+    sk_sp<SkImageFilter> imageSource(SkImageFilters::Image(make_img(), SkFilterMode::kNearest));
 
     // Crop out a 16 pixel ring around the result
     const SkIRect cropRect = SkIRect::MakeXYWH(16, 16, WIDTH_HEIGHT-32, WIDTH_HEIGHT-32);
@@ -100,8 +101,8 @@ public:
     ImageMagnifierBounds() : fX(0.f), fY(0.f) {}
 
 protected:
-    SkString onShortName() override { return SkString("imagemagnifier_bounds"); }
-    SkISize onISize() override { return SkISize::Make(768, 512); }
+    SkString getName() const override { return SkString("imagemagnifier_bounds"); }
+    SkISize getISize() override { return SkISize::Make(768, 512); }
 
     bool onAnimate(double nanos) override {
         fX = TimeUtils::SineWave(nanos, 10.f, 0.f, -200.f, 200.f);
@@ -168,8 +169,7 @@ private:
         // canvas matrix and available input automatically.
         sk_sp<SkImageFilter> magnifier =
                 SkImageFilters::Magnifier(widgetBounds, kZoomAmount, inset,
-                                          SkSamplingOptions{SkFilterMode::kLinear},
-                                          nullptr, kOutBounds);
+                                          SkFilterMode::kLinear, nullptr, kOutBounds);
 
         // Draw once as a backdrop filter
         canvas->save();

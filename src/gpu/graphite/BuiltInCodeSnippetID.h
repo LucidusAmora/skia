@@ -23,6 +23,8 @@ enum class BuiltInCodeSnippetID : int32_t {
 
     // SkShader code snippets
     kSolidColorShader,
+    kRGBPaintColor,
+    kAlphaOnlyPaintColor,
     kLinearGradientShader4,
     kLinearGradientShader8,
     kLinearGradientShaderTexture,
@@ -38,16 +40,17 @@ enum class BuiltInCodeSnippetID : int32_t {
 
     kLocalMatrixShader,
     kImageShader,
+    kCubicImageShader,
+    kHWImageShader,
     kYUVImageShader,
+    kCubicYUVImageShader,
     kCoordClampShader,
     kDitherShader,
     kPerlinNoiseShader,
-    kColorFilterShader,
     kRuntimeShader,
 
     // SkColorFilter code snippets
     kMatrixColorFilter,
-    kComposeColorFilter,
     kTableColorFilter,
     kGaussianColorFilter,
     kColorSpaceXformColorFilter,
@@ -57,13 +60,18 @@ enum class BuiltInCodeSnippetID : int32_t {
     kBlendModeBlender,
     kCoeffBlender,
 
-    // Special dst values to use as blender children
-    kDstColor,        // Emits special variable holding the color of the draw target
-    kPrimitiveColor,  // Emits special variable holding the primitiveColor emitted by a RenderStep
+    // Emits special variable holding the primitiveColor emitted by a RenderStep
+    kPrimitiveColor,
 
-    // One of these must be included at the beginning of a shader if DstColor block is used
+    // Dest Read code snippets
     kDstReadSample,
     kDstReadFetch,
+
+    // Clip shader snippet
+    // TODO(b/238763003): Avoid incorporating clip shaders into the actual shader code.
+    kClipShader,
+
+    kCompose,
 
     // Fixed-function blend modes are used for the final blend with the dst buffer's color when the
     // SkPaint is using a coefficient-based SkBlendMode. The actual coefficients are extracted into
@@ -98,6 +106,6 @@ static constexpr int kFixedFunctionBlendModeIDOffset =
 
 static_assert(BuiltInCodeSnippetID::kLast == BuiltInCodeSnippetID::kFixedFunctionScreenBlendMode);
 
-} // skgpu::graphite
+}  // namespace skgpu::graphite
 
 #endif // skgpu_graphite_BuiltInCodeSnippetID_DEFINED

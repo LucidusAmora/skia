@@ -73,7 +73,6 @@ static const struct {
     { "glslug",                "gpu", "api=gl,slug=true" },
     { "glserializeslug",       "gpu", "api=gl,serializeSlug=true" },
     { "glremoteslug",          "gpu", "api=gl,remoteSlug=true" },
-    { "gltestthreading",       "gpu", "api=gl,testThreading=true" },
     { "gltestpersistentcache", "gpu", "api=gl,testPersistentCache=1" },
     { "gltestglslcache",       "gpu", "api=gl,testPersistentCache=2" },
     { "gltestprecompile",      "gpu", "api=gl,testPrecompile=true" },
@@ -101,9 +100,6 @@ static const struct {
     { "angle_mtl_es2",         "gpu", "api=angle_mtl_es2" },
     { "angle_mtl_es3",         "gpu", "api=angle_mtl_es3" },
     { "mock",                  "gpu", "api=mock" },
-#ifdef SK_DAWN
-    { "dawn",                  "gpu", "api=dawn" },
-#endif
 #ifdef SK_VULKAN
     { "vk",                    "gpu", "api=vulkan" },
     { "vkf16",                 "gpu", "api=vulkan,color=f16" },
@@ -123,6 +119,7 @@ static const struct {
     { "mtlf16norm",            "gpu", "api=metal,color=f16norm" },
     { "mtlsrgba",              "gpu", "api=metal,color=srgba"},
     { "mtl1010102",            "gpu", "api=metal,color=1010102" },
+    { "mtl_dmsaa",             "gpu", "api=metal,dmsaa=true" },
     { "mtlmsaa4",              "gpu", "api=metal,samples=4" },
     { "mtlmsaa8",              "gpu", "api=metal,samples=8" },
     { "mtlddl",                "gpu", "api=metal,useDDLSink=true" },
@@ -140,13 +137,17 @@ static const struct {
     { "grd3d",                 "graphite", "api=direct3d" },
 #endif
 #ifdef SK_DAWN
-    { "grdawn",                "graphite", "api=dawn" },
+    { "grdawn_fakeWGPU",       "graphite", "api=dawn_mtl,fakeWGPU=true" },
     { "grdawn_d3d11",          "graphite", "api=dawn_d3d11" },
     { "grdawn_d3d12",          "graphite", "api=dawn_d3d12" },
     { "grdawn_mtl",            "graphite", "api=dawn_mtl" },
     { "grdawn_vk",             "graphite", "api=dawn_vk" },
     { "grdawn_gl",             "graphite", "api=dawn_gl" },
     { "grdawn_gles",           "graphite", "api=dawn_gles" },
+#if defined(SK_ENABLE_PRECOMPILE)
+    { "grdawn_mtlprecompile",  "graphite", "api=dawn_mtl,precompile=true" },
+    { "grdawn_vkprecompile",   "graphite", "api=dawn_vk, precompile=true" },
+#endif
 #endif
 #ifdef SK_METAL
     { "grmtl",                 "graphite", "api=metal" },
@@ -154,9 +155,17 @@ static const struct {
     { "grmtlf16norm",          "graphite", "api=metal,color=f16norm" },
     { "grmtlsrgba",            "graphite", "api=metal,color=srgba"},
     { "grmtl1010102",          "graphite", "api=metal,color=1010102" },
+#if defined(SK_ENABLE_PRECOMPILE)
+    { "grmtlprecompile",       "graphite", "api=metal,precompile=true" },
+    { "grmtlprecompilef16",    "graphite", "api=metal,precompile=true,color=f16" },
+    { "grmtlprecompile1010102","graphite", "api=metal,precompile=true,color=1010102" },
+#endif
 #endif
 #ifdef SK_VULKAN
     { "grvk",                  "graphite", "api=vulkan" },
+#if defined(SK_ENABLE_PRECOMPILE)
+    { "grvkprecompile",        "graphite", "api=vulkan,precompile=true" },
+#endif
 #endif
 #endif
 
@@ -218,7 +227,6 @@ static const char configExtendedHelp[] =
         "\t    Use multisampling with N samples.\n"
         "\tstencils\ttype: bool\tdefault: true.\n"
         "\t    Allow the use of stencil buffers.\n"
-        "\ttestThreading\ttype: bool\tdefault: false.\n"
         "\t    Run with and without worker threads, check that results match.\n"
         "\ttestPersistentCache\ttype: int\tdefault: 0.\n"
         "\t    1: Run using a pre-warmed binary GrContextOptions::fPersistentCache.\n"
@@ -307,71 +315,65 @@ static bool parse_option_gpu_api(const SkString&                      value,
                                  bool*                                outFakeGLESVersion2) {
     *outFakeGLESVersion2 = false;
     if (value.equals("gl")) {
-        *outContextType = GrContextFactory::kGL_ContextType;
+        *outContextType = skgpu::ContextType::kGL;
         return true;
     }
     if (value.equals("gles")) {
-        *outContextType = GrContextFactory::kGLES_ContextType;
+        *outContextType = skgpu::ContextType::kGLES;
         return true;
     }
     if (value.equals("glesfakev2")) {
-        *outContextType = GrContextFactory::kGLES_ContextType;
+        *outContextType = skgpu::ContextType::kGLES;
         *outFakeGLESVersion2 = true;
         return true;
     }
     if (value.equals("angle_d3d9_es2")) {
-        *outContextType = GrContextFactory::kANGLE_D3D9_ES2_ContextType;
+        *outContextType = skgpu::ContextType::kANGLE_D3D9_ES2;
         return true;
     }
     if (value.equals("angle_d3d11_es2")) {
-        *outContextType = GrContextFactory::kANGLE_D3D11_ES2_ContextType;
+        *outContextType = skgpu::ContextType::kANGLE_D3D11_ES2;
         return true;
     }
     if (value.equals("angle_d3d11_es3")) {
-        *outContextType = GrContextFactory::kANGLE_D3D11_ES3_ContextType;
+        *outContextType = skgpu::ContextType::kANGLE_D3D11_ES3;
         return true;
     }
     if (value.equals("angle_gl_es2")) {
-        *outContextType = GrContextFactory::kANGLE_GL_ES2_ContextType;
+        *outContextType = skgpu::ContextType::kANGLE_GL_ES2;
         return true;
     }
     if (value.equals("angle_gl_es3")) {
-        *outContextType = GrContextFactory::kANGLE_GL_ES3_ContextType;
+        *outContextType = skgpu::ContextType::kANGLE_GL_ES3;
         return true;
     }
     if (value.equals("angle_mtl_es2")) {
-        *outContextType = GrContextFactory::kANGLE_Metal_ES2_ContextType;
+        *outContextType = skgpu::ContextType::kANGLE_Metal_ES2;
         return true;
     }
     if (value.equals("angle_mtl_es3")) {
-        *outContextType = GrContextFactory::kANGLE_Metal_ES3_ContextType;
+        *outContextType = skgpu::ContextType::kANGLE_Metal_ES3;
         return true;
     }
     if (value.equals("mock")) {
-        *outContextType = GrContextFactory::kMock_ContextType;
+        *outContextType = skgpu::ContextType::kMock;
         return true;
     }
 #ifdef SK_VULKAN
     if (value.equals("vulkan")) {
-        *outContextType = GrContextFactory::kVulkan_ContextType;
+        *outContextType = skgpu::ContextType::kVulkan;
         return true;
     }
 #endif
 #ifdef SK_METAL
     if (value.equals("metal")) {
-        *outContextType = GrContextFactory::kMetal_ContextType;
+        *outContextType = skgpu::ContextType::kMetal;
         return true;
     }
 #endif
 #ifdef SK_DIRECT3D
     if (value.equals("direct3d")) {
-        *outContextType = GrContextFactory::kDirect3D_ContextType;
-        return true;
-    }
-#endif
-#ifdef SK_DAWN
-    if (value.equals("dawn")) {
-        *outContextType = GrContextFactory::kDawn_ContextType;
+        *outContextType = skgpu::ContextType::kDirect3D;
         return true;
     }
 #endif
@@ -486,50 +488,46 @@ public:
             return false;
         }
 #ifdef SK_DAWN
-        if (optionValue->equals("dawn")) {
-            *outContextType = sk_gpu_test::GrContextFactory::kDawn_ContextType;
-            return true;
-        }
         if (optionValue->equals("dawn_d3d11")) {
-            *outContextType = sk_gpu_test::GrContextFactory::kDawn_D3D11_ContextType;
+            *outContextType = skgpu::ContextType::kDawn_D3D11;
             return true;
         }
         if (optionValue->equals("dawn_d3d12")) {
-            *outContextType = sk_gpu_test::GrContextFactory::kDawn_D3D12_ContextType;
+            *outContextType = skgpu::ContextType::kDawn_D3D12;
             return true;
         }
         if (optionValue->equals("dawn_mtl")) {
-            *outContextType = sk_gpu_test::GrContextFactory::kDawn_Metal_ContextType;
+            *outContextType = skgpu::ContextType::kDawn_Metal;
             return true;
         }
         if (optionValue->equals("dawn_vk")) {
-            *outContextType = sk_gpu_test::GrContextFactory::kDawn_Vulkan_ContextType;
+            *outContextType = skgpu::ContextType::kDawn_Vulkan;
             return true;
         }
         if (optionValue->equals("dawn_gl")) {
-            *outContextType = sk_gpu_test::GrContextFactory::kDawn_OpenGL_ContextType;
+            *outContextType = skgpu::ContextType::kDawn_OpenGL;
             return true;
         }
         if (optionValue->equals("dawn_gles")) {
-            *outContextType = sk_gpu_test::GrContextFactory::kDawn_OpenGLES_ContextType;
+            *outContextType = skgpu::ContextType::kDawn_OpenGLES;
             return true;
         }
 #endif
 #ifdef SK_DIRECT3D
         if (optionValue->equals("direct3d")) {
-            *outContextType = sk_gpu_test::GrContextFactory::kDirect3D_ContextType;
+            *outContextType = skgpu::ContextType::kDirect3D;
             return true;
         }
 #endif
 #ifdef SK_METAL
         if (optionValue->equals("metal")) {
-            *outContextType = sk_gpu_test::GrContextFactory::kMetal_ContextType;
+            *outContextType = skgpu::ContextType::kMetal;
             return true;
         }
 #endif
 #ifdef SK_VULKAN
         if (optionValue->equals("vulkan")) {
-            *outContextType = sk_gpu_test::GrContextFactory::kVulkan_ContextType;
+            *outContextType = skgpu::ContextType::kVulkan;
             return true;
         }
 #endif
@@ -577,7 +575,6 @@ SkCommandLineConfigGpu::SkCommandLineConfigGpu(const SkString&         tag,
                                                SkColorType             colorType,
                                                SkAlphaType             alphaType,
                                                bool                    useStencilBuffers,
-                                               bool                    testThreading,
                                                int                     testPersistentCache,
                                                bool                    testPrecompile,
                                                bool                    useDDLSink,
@@ -593,7 +590,6 @@ SkCommandLineConfigGpu::SkCommandLineConfigGpu(const SkString&         tag,
         , fSamples(samples)
         , fColorType(colorType)
         , fAlphaType(alphaType)
-        , fTestThreading(testThreading)
         , fTestPersistentCache(testPersistentCache)
         , fTestPrecompile(testPrecompile)
         , fUseDDLSink(useDDLSink)
@@ -617,14 +613,13 @@ SkCommandLineConfigGpu* parse_command_line_config_gpu(const SkString&         ta
                                                       const TArray<SkString>& vias,
                                                       const SkString&         options) {
     // Defaults for GPU backend.
-    SkCommandLineConfigGpu::ContextType contextType         = GrContextFactory::kGL_ContextType;
+    SkCommandLineConfigGpu::ContextType contextType         = skgpu::ContextType::kGL;
     bool                                useDIText           = false;
     bool                                useDMSAA            = false;
     int                                 samples             = 1;
     SkColorType                         colorType           = kRGBA_8888_SkColorType;
     SkAlphaType                         alphaType           = kPremul_SkAlphaType;
     bool                                useStencils         = true;
-    bool                                testThreading       = false;
     int                                 testPersistentCache = 0;
     bool                                testPrecompile      = false;
     bool                                useDDLs             = false;
@@ -648,7 +643,6 @@ SkCommandLineConfigGpu* parse_command_line_config_gpu(const SkString&         ta
             extendedOptions.get_option_bool("dmsaa", &useDMSAA) &&
             extendedOptions.get_option_gpu_color("color", &colorType, &alphaType) &&
             extendedOptions.get_option_bool("stencils", &useStencils) &&
-            extendedOptions.get_option_bool("testThreading", &testThreading) &&
             extendedOptions.get_option_int("testPersistentCache", &testPersistentCache) &&
             extendedOptions.get_option_bool("testPrecompile", &testPrecompile) &&
             extendedOptions.get_option_bool("useDDLSink", &useDDLs) &&
@@ -658,8 +652,7 @@ SkCommandLineConfigGpu* parse_command_line_config_gpu(const SkString&         ta
             extendedOptions.get_option_bool("reducedShaders", &reducedShaders) &&
             extendedOptions.get_option_gpu_surf_type("surf", &surfType);
 
-    // testing threading and the persistent cache are mutually exclusive.
-    if (!validOptions || (testThreading && (testPersistentCache != 0))) {
+    if (!validOptions) {
         return nullptr;
     }
 
@@ -680,7 +673,6 @@ SkCommandLineConfigGpu* parse_command_line_config_gpu(const SkString&         ta
                                       colorType,
                                       alphaType,
                                       useStencils,
-                                      testThreading,
                                       testPersistentCache,
                                       testPrecompile,
                                       useDDLs,
@@ -693,14 +685,17 @@ SkCommandLineConfigGpu* parse_command_line_config_gpu(const SkString&         ta
 
 #if defined(SK_GRAPHITE)
 
-SkCommandLineConfigGraphite* parse_command_line_config_graphite(const SkString&           tag,
+SkCommandLineConfigGraphite* parse_command_line_config_graphite(const SkString& tag,
                                                                 const TArray<SkString>& vias,
-                                                                const SkString&           options) {
-    using ContextType = sk_gpu_test::GrContextFactory::ContextType;
+                                                                const SkString& options) {
+    using ContextType = skgpu::ContextType;
 
-    ContextType contextType = sk_gpu_test::GrContextFactory::kMetal_ContextType;
-    SkColorType colorType = kRGBA_8888_SkColorType;
-    SkAlphaType alphaType = kPremul_SkAlphaType;
+    ContextType contextType    = skgpu::ContextType::kMetal;
+    SkColorType colorType      = kRGBA_8888_SkColorType;
+    SkAlphaType alphaType      = kPremul_SkAlphaType;
+    bool        testPrecompile = false;
+
+    skiatest::graphite::TestOptions testOptions;
 
     bool parseSucceeded = false;
     ExtendedOptions extendedOptions(options, &parseSucceeded);
@@ -708,29 +703,41 @@ SkCommandLineConfigGraphite* parse_command_line_config_graphite(const SkString& 
         return nullptr;
     }
 
+    bool fakeWGPU = false;
     bool validOptions = extendedOptions.get_option_graphite_api("api", &contextType) &&
-                        extendedOptions.get_option_gpu_color("color", &colorType, &alphaType);
+                        extendedOptions.get_option_gpu_color("color", &colorType, &alphaType) &&
+                        extendedOptions.get_option_bool("fakeWGPU", &fakeWGPU) &&
+                        extendedOptions.get_option_bool("precompile", &testPrecompile);
     if (!validOptions) {
         return nullptr;
+    }
+
+    auto surfaceType = SkCommandLineConfigGraphite::SurfaceType::kDefault;
+    if (fakeWGPU) {
+        testOptions.fNeverYieldToWebGPU = true;
+        surfaceType = SkCommandLineConfigGraphite::SurfaceType::kWrapTextureView;
     }
 
     return new SkCommandLineConfigGraphite(tag,
                                            vias,
                                            contextType,
+                                           surfaceType,
+                                           testOptions,
                                            colorType,
-                                           alphaType);
+                                           alphaType,
+                                           testPrecompile);
 }
 
 #endif
 
-SkCommandLineConfigSvg::SkCommandLineConfigSvg(const SkString&           tag,
+SkCommandLineConfigSvg::SkCommandLineConfigSvg(const SkString& tag,
                                                const TArray<SkString>& viaParts,
-                                               int                       pageIndex)
+                                               int pageIndex)
         : SkCommandLineConfig(tag, SkString("svg"), viaParts), fPageIndex(pageIndex) {}
 
-SkCommandLineConfigSvg* parse_command_line_config_svg(const SkString&           tag,
+SkCommandLineConfigSvg* parse_command_line_config_svg(const SkString& tag,
                                                       const TArray<SkString>& vias,
-                                                      const SkString&           options) {
+                                                      const SkString& options) {
     // Defaults for SVG backend.
     int pageIndex = 0;
 
@@ -753,12 +760,12 @@ void ParseConfigs(const CommandLineFlags::StringArray& configs,
                   SkCommandLineConfigArray*            outResult) {
     outResult->clear();
     for (int i = 0; i < configs.size(); ++i) {
-        SkString           extendedBackend;
-        SkString           extendedOptions;
-        SkString           simpleBackend;
+        SkString         extendedBackend;
+        SkString         extendedOptions;
+        SkString         simpleBackend;
         TArray<SkString> vias;
 
-        SkString           tag(configs[i]);
+        SkString         tag(configs[i]);
         TArray<SkString> parts;
         SkStrSplit(tag.c_str(), "[", kStrict_SkStrSplitMode, &parts);
         if (parts.size() == 2) {

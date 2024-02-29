@@ -10,9 +10,9 @@
 
 #include "include/core/SkSpan.h"
 #include "include/core/SkTypes.h"
-#include "include/private/SkOpts_spi.h"
 #include "include/private/base/SkMacros.h"
 #include "include/private/base/SkTArray.h"
+#include "src/core/SkChecksum.h"
 #include "src/gpu/graphite/BuiltInCodeSnippetID.h"
 
 #include <limits>
@@ -58,6 +58,10 @@ public:
     // a fixed function blend (with 1 child being the main effect)).
     SkSpan<const ShaderNode*> getRootNodes(const ShaderCodeDictionary*, SkArenaAlloc*) const;
 
+#if defined(GRAPHITE_TEST_UTILS)
+    // Converts the key to a structured list of snippet names for debugging purposes.
+    SkString toString(const ShaderCodeDictionary* dict) const;
+#endif
 #ifdef SK_DEBUG
     void dump(const ShaderCodeDictionary*) const;
 #endif
@@ -70,7 +74,7 @@ public:
 
     struct Hash {
         uint32_t operator()(const PaintParamsKey& k) const {
-            return SkOpts::hash_fn(k.fData.data(), k.fData.size_bytes(), 0);
+            return SkChecksum::Hash32(k.fData.data(), k.fData.size_bytes());
         }
     };
 
@@ -126,6 +130,12 @@ public:
     // Check that the builder has been reset to its initial state prior to creating a new key.
     void checkReset();
 #endif
+
+    // Helper to add blocks that don't have children
+    void addBlock(BuiltInCodeSnippetID id) {
+        this->beginBlock(id);
+        this->endBlock();
+    }
 
 private:
     friend class AutoLockBuilderAsKey; // for lockAsKey() and unlock()
@@ -190,6 +200,6 @@ private:
     PaintParamsKey fKey;
 };
 
-} // skgpu::graphite
+}  // namespace skgpu::graphite
 
 #endif // skgpu_graphite_PaintParamsKey_DEFINED

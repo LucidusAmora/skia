@@ -60,6 +60,13 @@ public:
     }
 
     /**
+     *  Will this generator produce protected content
+     */
+    bool isProtected() const {
+        return this->onIsProtected();
+    }
+
+    /**
      *  Decode into the given pixels, a block of memory of size at
      *  least (info.fHeight - 1) * rowBytes + (info.fWidth *
      *  bytesPerPixel)
@@ -113,12 +120,6 @@ public:
 
     virtual bool isTextureGenerator() const { return false; }
 
-#if defined(SK_GRAPHITE)
-    sk_sp<SkImage> makeTextureImage(skgpu::graphite::Recorder*,
-                                    const SkImageInfo&,
-                                    skgpu::Mipmapped);
-#endif
-
 protected:
     static constexpr int kNeedNewImageUniqueID = 0;
 
@@ -128,15 +129,11 @@ protected:
     struct Options {};
     virtual bool onGetPixels(const SkImageInfo&, void*, size_t, const Options&) { return false; }
     virtual bool onIsValid(GrRecordingContext*) const { return true; }
+    virtual bool onIsProtected() const { return false; }
     virtual bool onQueryYUVAInfo(const SkYUVAPixmapInfo::SupportedDataTypes&,
                                  SkYUVAPixmapInfo*) const { return false; }
     virtual bool onGetYUVAPlanes(const SkYUVAPixmaps&) { return false; }
 
-#if defined(SK_GRAPHITE)
-    virtual sk_sp<SkImage> onMakeTextureImage(skgpu::graphite::Recorder*,
-                                              const SkImageInfo&,
-                                              skgpu::Mipmapped);
-#endif
     const SkImageInfo fInfo;
 
 private:

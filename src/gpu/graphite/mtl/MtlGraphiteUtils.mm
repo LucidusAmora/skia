@@ -14,6 +14,7 @@
 #include "src/gpu/graphite/ContextPriv.h"
 #include "src/gpu/graphite/mtl/MtlQueueManager.h"
 #include "src/gpu/graphite/mtl/MtlSharedContext.h"
+#include "src/gpu/mtl/MtlUtilsPriv.h"
 
 namespace skgpu::graphite {
 
@@ -56,6 +57,17 @@ MTLPixelFormat MtlDepthStencilFlagsToFormat(SkEnumBitMask<DepthStencilFlags> mas
     return MTLPixelFormatInvalid;
 }
 
+SkEnumBitMask<DepthStencilFlags> MtlFormatToDepthStencilFlags(MTLPixelFormat format) {
+    switch (format) {
+        case MTLPixelFormatDepth32Float:          return DepthStencilFlags::kDepth;
+        case MTLPixelFormatStencil8:              return DepthStencilFlags::kStencil;
+        case MTLPixelFormatDepth32Float_Stencil8: return DepthStencilFlags::kDepthStencil;
+        default:                                  return DepthStencilFlags::kNone;
+    }
+
+    SkUNREACHABLE;
+}
+
 sk_cfp<id<MTLLibrary>> MtlCompileShaderLibrary(const MtlSharedContext* sharedContext,
                                                std::string_view msl,
                                                ShaderErrorHandler* errorHandler) {
@@ -70,15 +82,15 @@ sk_cfp<id<MTLLibrary>> MtlCompileShaderLibrary(const MtlSharedContext* sharedCon
     MTLCompileOptions* options = [[MTLCompileOptions alloc] init];
 
     // Framebuffer fetch is supported in MSL 2.3 in MacOS 11+.
-    if (@available(macOS 11.0, iOS 14.0, *)) {
+    if (@available(macOS 11.0, iOS 14.0, tvOS 14.0, *)) {
         options.languageVersion = MTLLanguageVersion2_3;
 
     // array<> is supported in MSL 2.0 on MacOS 10.13+ and iOS 11+,
     // and in MSL 1.2 on iOS 10+ (but not MacOS).
-    } else if (@available(macOS 10.13, iOS 11.0, *)) {
+    } else if (@available(macOS 10.13, iOS 11.0, tvOS 11.0, *)) {
         options.languageVersion = MTLLanguageVersion2_0;
 #if defined(SK_BUILD_FOR_IOS)
-    } else if (@available(macOS 10.12, iOS 10.0, *)) {
+    } else if (@available(macOS 10.12, iOS 10.0, tvOS 10.0, *)) {
         options.languageVersion = MTLLanguageVersion1_2;
 #endif
     }
@@ -91,11 +103,16 @@ sk_cfp<id<MTLLibrary>> MtlCompileShaderLibrary(const MtlSharedContext* sharedCon
                                                     error:&error]);
     if (!compiledLibrary) {
         std::string mslStr(msl);
-        errorHandler->compileError(mslStr.c_str(), error.debugDescription.UTF8String);
+        errorHandler->compileError(
+                mslStr.c_str(), error.debugDescription.UTF8String, /*shaderWasCached=*/false);
         return nil;
     }
 
     return compiledLibrary;
+}
+
+size_t MtlFormatBytesPerBlock(MtlPixelFormat format) {
+    return skgpu::MtlFormatBytesPerBlock((MTLPixelFormat) format);
 }
 
 } // namespace skgpu::graphite

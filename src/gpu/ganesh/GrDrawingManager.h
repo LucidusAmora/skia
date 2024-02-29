@@ -25,6 +25,7 @@
 #define GR_PATH_RENDERER_SPEW 0
 
 class GrArenas;
+class GrDeferredDisplayList;
 class GrGpuBuffer;
 class GrOnFlushCallbackObject;
 class GrOpFlushState;
@@ -35,7 +36,6 @@ class GrResourceAllocator;
 class GrSemaphore;
 class GrSurfaceProxyView;
 class GrTextureResolveRenderTask;
-class SkDeferredDisplayList;
 namespace skgpu {
 namespace ganesh {
 class OpsTask;
@@ -74,7 +74,7 @@ public:
     // work (even to other proxies) that has already been recorded or will be recorded later. The
     // only guarantee is that future work to the passed in proxy will wait on the semaphores to be
     // signaled.
-    void newWaitRenderTask(sk_sp<GrSurfaceProxy> proxy,
+    void newWaitRenderTask(const sk_sp<GrSurfaceProxy>& proxy,
                            std::unique_ptr<std::unique_ptr<GrSemaphore>[]>,
                            int numSemaphores);
 
@@ -83,7 +83,7 @@ public:
     // to be copied. The surfaceColorType says how we should interpret the data when reading back
     // from the source. DstColorType describes how the data should be stored in the dstBuffer.
     // DstOffset is the offset into the dstBuffer where we will start writing data.
-    void newTransferFromRenderTask(sk_sp<GrSurfaceProxy> srcProxy, const SkIRect& srcRect,
+    void newTransferFromRenderTask(const sk_sp<GrSurfaceProxy>& srcProxy, const SkIRect& srcRect,
                                    GrColorType surfaceColorType, GrColorType dstColorType,
                                    sk_sp<GrGpuBuffer> dstBuffer, size_t dstOffset);
 
@@ -98,7 +98,7 @@ public:
     // it skippable if the copy is later deemed unnecessary.
     sk_sp<GrRenderTask> newCopyRenderTask(sk_sp<GrSurfaceProxy> dst,
                                           SkIRect dstRect,
-                                          sk_sp<GrSurfaceProxy> src,
+                                          const sk_sp<GrSurfaceProxy>& src,
                                           SkIRect srcRect,
                                           GrSamplerState::Filter filter,
                                           GrSurfaceOrigin);
@@ -157,13 +157,13 @@ public:
     static bool ProgramUnitTest(GrDirectContext*, int maxStages, int maxLevels);
 
     GrSemaphoresSubmitted flushSurfaces(SkSpan<GrSurfaceProxy*>,
-                                        SkSurface::BackendSurfaceAccess,
+                                        SkSurfaces::BackendSurfaceAccess,
                                         const GrFlushInfo&,
                                         const skgpu::MutableTextureState* newState);
 
     void addOnFlushCallbackObject(GrOnFlushCallbackObject*);
 
-#if GR_TEST_UTILS
+#if defined(GR_TEST_UTILS)
     void testingOnly_removeOnFlushCallbackObject(GrOnFlushCallbackObject*);
     PathRendererChain::Options testingOnly_getOptionsForPathRendererChain() {
         return fOptionsForPathRendererChain;
@@ -174,15 +174,14 @@ public:
     skgpu::ganesh::OpsTask* getLastOpsTask(const GrSurfaceProxy*) const;
     void setLastRenderTask(const GrSurfaceProxy*, GrRenderTask*);
 
-    void moveRenderTasksToDDL(SkDeferredDisplayList* ddl);
-    void createDDLTask(sk_sp<const SkDeferredDisplayList>,
-                       sk_sp<GrRenderTargetProxy> newDest,
-                       SkIPoint offset);
+    void moveRenderTasksToDDL(GrDeferredDisplayList* ddl);
+    void createDDLTask(sk_sp<const GrDeferredDisplayList>,
+                       sk_sp<GrRenderTargetProxy> newDest);
 
     // This is public so it can be called by an SkImage factory (in SkImages namespace).
     // It is not meant to be directly called in other situations.
     bool flush(SkSpan<GrSurfaceProxy*> proxies,
-               SkSurface::BackendSurfaceAccess access,
+               SkSurfaces::BackendSurfaceAccess access,
                const GrFlushInfo&,
                const skgpu::MutableTextureState* newState);
 
@@ -212,9 +211,9 @@ private:
     GrRenderTask* appendTask(sk_sp<GrRenderTask>);
     GrRenderTask* insertTaskBeforeLast(sk_sp<GrRenderTask>);
 
-    bool submitToGpu(bool syncToCpu);
+    bool submitToGpu(GrSyncCpu sync);
 
-    SkDEBUGCODE(void validate() const);
+    SkDEBUGCODE(void validate() const;)
 
     friend class GrDirectContext; // access to: flush & cleanup
     friend class GrOnFlushResourceProvider; // this is just a shallow wrapper around this class

@@ -13,20 +13,19 @@ load("@skia_user_config//:linkopts.bzl", "DEFAULT_LINKOPTS")
 
 _bool_flags = [
     "//bazel/common_config_settings:use_harfbuzz",
+    "//bazel/common_config_settings:use_fontations",
     "//bazel/common_config_settings:use_icu",
     "//src/gpu/ganesh/vk:enable_secondary_draw_context",
     "//src/gpu:enable_gpu_test_utils",
     "//src/lazy:enable_discardable_memory",
     "//src/lazy:use_default_global_memory_pool",
     "//src/pdf:enable_pdf_backend",
-    "//src/sksl:enable_sksl",
     "//src/sksl:enable_sksl_tracing",
     "//src/sksl:enable_skslc",
     "//src/svg:enable_svg_canvas",
 ]
 
 _string_flags = [
-    "//bazel/common_config_settings:fontmgr_factory",
     "//src/gpu:with_gl_standard",
 ]
 
@@ -96,7 +95,7 @@ def _transition_rule_impl(ctx):
     return [
         DefaultInfo(
             executable = outfile,
-            runfiles = actual_binary[DefaultInfo].default_runfiles,
+            runfiles = actual_binary[DefaultInfo].data_runfiles,
         ),
     ]
 

@@ -131,8 +131,8 @@ private:
         skia_private::STArray<128, PositionAdjustment, true> fUtf8PosAdjust;
 
         void reserve(size_t size) {
-            fUtf8.reserve_back(SkToInt(size));
-            fUtf8PosAdjust.reserve_back(SkToInt(size));
+            fUtf8.reserve_exact(fUtf8.size() + SkToInt(size));
+            fUtf8PosAdjust.reserve_exact(fUtf8PosAdjust.size() + SkToInt(size));
         }
 
         void reset() {
@@ -179,7 +179,7 @@ private:
     void commitRunInfo() override {}
     Buffer runBuffer(const RunInfo& ri) override;
     void commitRunBuffer(const RunInfo& ri) override;
-    void commitLine() override {}
+    void commitLine() override;
 
     // http://www.w3.org/TR/SVG11/text.html#TextLayout
     const SkSVGRenderContext&       fRenderContext; // original render context

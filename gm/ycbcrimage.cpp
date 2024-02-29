@@ -35,12 +35,9 @@ public:
     }
 
 protected:
+    SkString getName() const override { return SkString("ycbcrimage"); }
 
-    SkString onShortName() override {
-        return SkString("ycbcrimage");
-    }
-
-    SkISize onISize() override {
+    SkISize getISize() override {
         return SkISize::Make(2*kPad+kImageSize, 2*kPad+kImageSize);
     }
 
@@ -75,7 +72,7 @@ protected:
         return DrawResult::kOk;
     }
 
-    DrawResult onGpuSetup(SkCanvas* canvas, SkString* errorMsg) override {
+    DrawResult onGpuSetup(SkCanvas* canvas, SkString* errorMsg, GraphiteTestContext*) override {
         GrDirectContext* dContext = GrAsDirectContext(canvas->recordingContext());
         if (!dContext || dContext->abandoned()) {
             return DrawResult::kSkip;

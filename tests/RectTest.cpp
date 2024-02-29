@@ -287,6 +287,7 @@ DEF_TEST(Rect_QuadContainsRect, reporter) {
         SkMatrix m;
         SkIRect a;
         SkIRect b;
+        float tol = 0.f;
     };
 
     TestCase tests[] = {
@@ -325,18 +326,39 @@ DEF_TEST(Rect_QuadContainsRect, reporter) {
 
         { "Unsorted rect is contained", /*expect=*/true,
           /*m=*/SkMatrix::I(), /*a=*/{0,0,10,10}, /*b=*/{8,8,2,2}},
+
+        // NOTE: preTranslate(65.f, 0.f) gives enough of a different matrix that the contains()
+        // passes even without the epsilon allowance.
+        { "Epsilon not contained", /*expect=*/true,
+          /*m=*/SkMatrix::MakeAll( 0.984808f, 0.173648f, -98.4808f,
+                                  -0.173648f, 0.984808f,  17.3648f,
+                                   0.000000f, 0.000000f,   1.0000f)
+                         .preTranslate(65.f, 0.f),
+          /*a=*/{0, 0, 134, 215}, /*b=*/{0, 0, 100, 200}, /*tol=*/0.001f},
     };
 
     for (const TestCase& t : tests) {
         skiatest::ReporterContext c{reporter, t.label};
-        REPORTER_ASSERT(reporter, SkRectPriv::QuadContainsRect(t.m, t.a, t.b) == t.expect);
+        REPORTER_ASSERT(reporter, SkRectPriv::QuadContainsRect(t.m, t.a, t.b, t.tol) == t.expect);
 
         // Generate equivalent tests for SkRect and SkM44 by translating a by 1/2px and 'b' by
         // 1/2px in post-transform space
         SkVector bOffset = t.m.mapVector(0.5f, 0.5f);
         SkRect af = SkRect::Make(t.a).makeOffset(0.5f, 0.5f);
         SkRect bf = SkRect::Make(t.b).makeOffset(bOffset.fX, bOffset.fY);
-        REPORTER_ASSERT(reporter, SkRectPriv::QuadContainsRect(SkM44(t.m), af, bf) == t.expect);
+        REPORTER_ASSERT(reporter,
+                        SkRectPriv::QuadContainsRect(SkM44(t.m), af, bf, t.tol) == t.expect);
+
+        if (t.tol != 0.f) {
+            // Expect the opposite result if we do not provide any tol.
+            REPORTER_ASSERT(reporter, SkRectPriv::QuadContainsRect(t.m, t.a, t.b) == !t.expect);
+
+            bOffset = t.m.mapVector(0.5f, 0.5f);
+            af = SkRect::Make(t.a).makeOffset(0.5f, 0.5f);
+            bf = SkRect::Make(t.b).makeOffset(bOffset.fX, bOffset.fY);
+            REPORTER_ASSERT(reporter,
+                            SkRectPriv::QuadContainsRect(SkM44(t.m), af, bf) == !t.expect);
+        }
     }
 
     // Test some more complicated scenarios with perspective that don't fit into the TestCase
@@ -373,6 +395,46 @@ DEF_TEST(Rect_QuadContainsRect, reporter) {
         REPORTER_ASSERT(reporter, !SkRectPriv::QuadContainsRect(p, na, {-1.1f,-1.8f,-1.f,-1.79f}));
         REPORTER_ASSERT(reporter, !SkRectPriv::QuadContainsRect(p, na, {-1.9f,-2.3f,-0.4f,-1.6f}));
     }
+}
+
+DEF_TEST(Rect_ClosestDisjointEdge, r) {
+    struct TestCase {
+        std::string label;
+        SkIRect dst;
+        SkIRect expect;
+    };
+
+    // All test cases will use this rect for the src, so dst can be conveniently relative to it.
+    static constexpr SkIRect kSrc = {0,0,10,10};
+    TestCase tests[] = {
+        { "src left edge",                  /*dst=*/{-15, -5, -2, 15}, /*expected=*/{0, 0,  1, 10}},
+        { "src left edge clipped to dst",   /*dst=*/{-15,  2, -2,  8}, /*expected=*/{0, 2,  1,  8}},
+        { "src top-left corner",            /*dst=*/{-15,-15, -2, -2}, /*expected=*/{0, 0,  1,  1}},
+        { "src top edge",                   /*dst=*/{ -5,-10, 15, -2}, /*expected=*/{0, 0, 10,  1}},
+        { "src top edge clipped to dst",    /*dst=*/{  2,-10,  8, -2}, /*expected=*/{2, 0,  8,  1}},
+        { "src top-right corner",           /*dst=*/{ 15,-15, 20, -2}, /*expected=*/{9, 0, 10,  1}},
+        { "src right edge",                 /*dst=*/{ 15, -5, 20, 15}, /*expected=*/{9, 0, 10, 10}},
+        { "src right edge clipped to dst",  /*dst=*/{ 15,  2, 20,  8}, /*expected=*/{9, 2, 10,  8}},
+        { "src bottom-right corner",        /*dst=*/{ 15, 15, 20, 20}, /*expected=*/{9, 9, 10, 10}},
+        { "src bottom edge",                /*dst=*/{ -5, 15, 15, 20}, /*expected=*/{0, 9, 10, 10}},
+        { "src bottom edge clipped to dst", /*dst=*/{  2, 15,  8, 20}, /*expected=*/{2, 9,  8, 10}},
+        { "src bottom-left corner",         /*dst=*/{-15, 15, -2, 20}, /*expected=*/{0, 9,  1, 10}},
+        { "src intersects dst high",        /*dst=*/{  2,  2, 15, 15}, /*expected=*/{2, 2, 10, 10}},
+        { "src intersects dst low",         /*dst=*/{ -5, -5,  8,  8}, /*expected=*/{0, 0,  8,  8}},
+        { "src contains dst",               /*dst=*/{  2,  2,  8,  8}, /*expected=*/{2, 2,  8,  8}},
+        { "src contained in dst",           /*dst=*/{ -5, -5, 15, 15}, /*expected=*/{0, 0, 10, 10}}
+    };
+
+    for (const TestCase& t : tests) {
+        skiatest::ReporterContext c{r, t.label};
+        SkIRect actual = SkRectPriv::ClosestDisjointEdge(kSrc, t.dst);
+        REPORTER_ASSERT(r, actual == t.expect);
+    }
+
+    // Test emptiness of src and dst
+    REPORTER_ASSERT(r, SkRectPriv::ClosestDisjointEdge(SkIRect::MakeEmpty(), {0,0,8,8}).isEmpty());
+    REPORTER_ASSERT(r, SkRectPriv::ClosestDisjointEdge({0,0,8,8}, SkIRect::MakeEmpty()).isEmpty());
+    REPORTER_ASSERT(r, SkRectPriv::ClosestDisjointEdge({10,10,-1,2}, {15,8,-2,20}).isEmpty());
 }
 
 // Before the fix, this sequence would trigger a release_assert in the Tiler

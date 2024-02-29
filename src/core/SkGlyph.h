@@ -457,7 +457,8 @@ public:
 
     // Returns true if the image has been set.
     bool setImageHasBeenCalled() const {
-        return fImage != nullptr || this->isEmpty() || this->imageTooLarge();
+        // Check for empty bounds first to guard against fImage somehow being set.
+        return this->isEmpty() || fImage != nullptr || this->imageTooLarge();
     }
 
     // Return a pointer to the path if the image exists, otherwise return nullptr.
@@ -511,11 +512,11 @@ public:
     int width()  const { return fWidth;  }
     int height() const { return fHeight; }
     bool isEmpty() const {
-        // fHeight == 0 -> fWidth == 0;
-        SkASSERT(fHeight != 0 || fWidth == 0);
-        return fWidth == 0;
+        return fWidth == 0 || fHeight == 0;
     }
     bool imageTooLarge() const { return fWidth >= kMaxGlyphWidth; }
+
+    uint16_t extraBits() const { return fScalerContextBits; }
 
     // Make sure that the intercept information is on the glyph and return it, or return it if it
     // already exists.
@@ -556,22 +557,7 @@ private:
     // There are two sides to an SkGlyph, the scaler side (things that create glyph data) have
     // access to all the fields. Scalers are assumed to maintain all the SkGlyph invariants. The
     // consumer side has a tighter interface.
-    friend class RandomScalerContext;
     friend class SkScalerContext;
-    friend class SkScalerContextProxy;
-    friend class SkScalerContext_Empty;
-    friend class SkScalerContext_FreeType;
-    friend class SkScalerContext_FreeType_Base;
-    friend class SkScalerContext_DW;
-    friend class SkScalerContext_GDI;
-    friend class SkScalerContext_Mac;
-    friend class SkStrikeClientImpl;
-    friend class SkTestScalerContext;
-    friend class SkTestSVGScalerContext;
-    friend class SkUserScalerContext;
-    friend class SkFontationsScalerContext;
-    friend class TestSVGTypeface;
-    friend class TestTypeface;
     friend class SkGlyphTestPeer;
 
     inline static constexpr uint16_t kMaxGlyphWidth = 1u << 13u;

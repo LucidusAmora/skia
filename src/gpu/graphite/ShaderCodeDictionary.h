@@ -16,8 +16,9 @@
 #include "include/private/base/SkThreadAnnotations.h"
 #include "include/private/base/SkTo.h"
 #include "src/base/SkArenaAlloc.h"
+#include "src/base/SkEnumBitMask.h"
 #include "src/base/SkSpinlock.h"
-#include "src/core/SkEnumBitMask.h"
+#include "src/core/SkKnownRuntimeEffects.h"
 #include "src/core/SkTHash.h"
 #include "src/gpu/Blend.h"
 #include "src/gpu/graphite/BuiltInCodeSnippetID.h"
@@ -62,7 +63,7 @@ enum class SnippetRequirementFlags : uint32_t {
     kBlenderDstColor = 0x4,  // The "dst" argument for a blender
     kSurfaceColor = 0x8,
 };
-SK_MAKE_BITMASK_OPS(SnippetRequirementFlags);
+SK_MAKE_BITMASK_OPS(SnippetRequirementFlags)
 
 class ShaderInfo;
 class ShaderNode;
@@ -102,13 +103,13 @@ struct ShaderSnippet {
         , fNumChildren(numChildren) {}
 
     bool needsLocalCoords() const {
-        return fSnippetRequirementFlags & SnippetRequirementFlags::kLocalCoords;
+        return SkToBool(fSnippetRequirementFlags & SnippetRequirementFlags::kLocalCoords);
     }
     bool needsPriorStageOutput() const {
-        return fSnippetRequirementFlags & SnippetRequirementFlags::kPriorStageOutput;
+        return SkToBool(fSnippetRequirementFlags & SnippetRequirementFlags::kPriorStageOutput);
     }
     bool needsBlenderDstColor() const {
-        return fSnippetRequirementFlags & SnippetRequirementFlags::kBlenderDstColor;
+        return SkToBool(fSnippetRequirementFlags & SnippetRequirementFlags::kBlenderDstColor);
     }
 
     const char* fName = nullptr;
@@ -177,10 +178,10 @@ public:
                const char* ssboIndex);
 
     bool needsLocalCoords() const {
-        return fSnippetRequirementFlags & SnippetRequirementFlags::kLocalCoords;
+        return SkToBool(fSnippetRequirementFlags & SnippetRequirementFlags::kLocalCoords);
     }
     bool needsSurfaceColor() const {
-        return fSnippetRequirementFlags & SnippetRequirementFlags::kSurfaceColor;
+        return SkToBool(fSnippetRequirementFlags & SnippetRequirementFlags::kSurfaceColor);
     }
     const RuntimeEffectDictionary* runtimeEffectDictionary() const {
         return fRuntimeEffectDictionary;
@@ -191,8 +192,11 @@ public:
 
     std::string toSkSL(const Caps* caps,
                        const RenderStep* step,
-                       const bool useStorageBuffers,
+                       bool useStorageBuffers,
                        int* numTexturesAndSamplersUsed,
+                       int* numPaintUniforms,
+                       int* renderStepUniformTotalBytes,
+                       int* paintUniformsTotalBytes,
                        Swizzle writeSwizzle);
 
 private:
@@ -231,42 +235,36 @@ public:
         return fBuiltInCodeSnippets[(int) id].fSnippetRequirementFlags;
     }
 
-    bool isValidID(int snippetID) const;
+#if defined(SK_DEBUG)
+    bool isValidID(int snippetID) const SK_EXCLUDES(fSpinLock);
+#endif
 
     // This method can return nullptr
-    const ShaderSnippet* getEntry(int codeSnippetID) const;
-    const ShaderSnippet* getEntry(BuiltInCodeSnippetID codeSnippetID) const {
+    const ShaderSnippet* getEntry(int codeSnippetID) const SK_EXCLUDES(fSpinLock);
+    const ShaderSnippet* getEntry(BuiltInCodeSnippetID codeSnippetID) const SK_EXCLUDES(fSpinLock) {
         return this->getEntry(SkTo<int>(codeSnippetID));
     }
 
     int findOrCreateRuntimeEffectSnippet(const SkRuntimeEffect* effect);
 
-    // TODO: Remove or make testing-only
-    int addUserDefinedSnippet(const char* name);
+#if defined(GRAPHITE_TEST_UTILS)
+    int addRuntimeEffectSnippet(const char* name) SK_EXCLUDES(fSpinLock);
+#endif
 
 private:
-    // TODO: this is still experimental but, most likely, it will need to be made thread-safe
-    // It returns the code snippet ID to use to identify the supplied user-defined code.
-    // TODO: Rename to addRuntimeEffectSnippet().
-    int addUserDefinedSnippet(
-        const char* name,
-        SkSpan<const Uniform> uniforms,
-        SkEnumBitMask<SnippetRequirementFlags> snippetRequirementFlags,
-        SkSpan<const TextureAndSampler> texturesAndSamplers,
-        const char* functionName,
-        ShaderSnippet::GenerateExpressionForSnippetFn expressionGenerator,
-        ShaderSnippet::GeneratePreambleForSnippetFn preambleGenerator,
-        int numChildren);
-
     const char* addTextToArena(std::string_view text);
 
     SkSpan<const Uniform> convertUniforms(const SkRuntimeEffect* effect);
 
     std::array<ShaderSnippet, kBuiltInCodeSnippetIDCount> fBuiltInCodeSnippets;
 
+    using KnownRuntimeEffectArray = std::array<ShaderSnippet, SkKnownRuntimeEffects::kStableKeyCnt>;
+    KnownRuntimeEffectArray fKnownRuntimeEffectCodeSnippets SK_GUARDED_BY(fSpinLock);
+
     // The value returned from 'getEntry' must be stable so, hold the user-defined code snippet
     // entries as pointers.
-    skia_private::TArray<std::unique_ptr<ShaderSnippet>> fUserDefinedCodeSnippets;
+    using RuntimeEffectArray = skia_private::TArray<std::unique_ptr<ShaderSnippet>>;
+    RuntimeEffectArray fUserDefinedCodeSnippets SK_GUARDED_BY(fSpinLock);
 
     // TODO: can we do something better given this should have write-seldom/read-often behavior?
     mutable SkSpinlock fSpinLock;
